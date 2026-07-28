@@ -2,6 +2,7 @@
 name = "binja-codemode-mcp"
 version = "0.2.0"
 description = "MCP server for LLM-assisted reverse engineering via code execution in Binary Ninja"
+license = "GPL-3.0-or-later"
 requires-python = ">=3.10"
 # No runtime dependencies, by design. Binary Ninja's bundled Python 3.10 ships a
 # complete stdlib; the plugin must never need pip at load time.

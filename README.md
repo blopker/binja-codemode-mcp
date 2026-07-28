@@ -141,6 +141,7 @@ make test       # lint + typecheck + tests
 make fmt        # apply autofixes and format
 make install    # symlink into Binary Ninja
 make status     # is it linked, is the endpoint up
+make driver     # drive a live session through tests/driver_plan.md
 ```
 
 `make help` lists everything.
@@ -195,19 +196,22 @@ from the app bundle. `binaryninja.load()` does not — a Personal licence forbid
 - `tests/test_integration.py` drives the whole stack over a real socket and asserts on
   what a client actually receives.
 
-### Checks that only work by hand
+### Checks that only work against a live session
 
-Whether a transaction reaches the `.bndb` cannot be tested here. After changing the
-executor or the session, in Binary Ninja:
+Whether a transaction reaches the `.bndb` cannot be tested here, and neither can undo
+grouping, tab handling, or the guide's own advice. `tests/driver_plan.md` covers that:
+`make driver` hands it to a model connected to a running server, which works through it
+and writes a report to `scratch/`. A human is needed twice — once to set up, once at a
+checkpoint that needs a save, a tab close, and a look at the window.
 
-- Rename ~20 functions via `execute`; confirm the view updates, ⌘Z reverts the batch as
-  one step, and the names survive save → close → reopen.
-- Raise an exception halfway through a mutating script; confirm nothing was applied.
-- Open two binaries; confirm the session stays pinned when you switch tabs.
+Read the report's E2 section first. Asking what the driver had to discover by trial and
+error is what produced most of `guide.md`, and it has repeatedly found things the suite
+could not: a failed script keeping its changes, a guide call swallowing a target switch,
+and `h.select` not reaching inside a saved function.
 
-To find friction the tests cannot, ask a model to use the server and report where it
-struggled, then fold the findings into `guide.md`. That loop is what produced most of the
-guide's content.
+Treat a reported failure as a hypothesis. Two have turned out to be artifacts of how the
+run was conducted rather than defects, so measure before changing anything — both times
+the disproof took two calls.
 
 ### Known limitations
 
@@ -231,4 +235,11 @@ guide's content.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+GPL-3.0-or-later — see [LICENSE](LICENSE). Copyright (C) 2026 BO LLC.
+
+## Acknowledgements
+
+Started as a fork of
+[binja-codemode-mcp](https://github.com/akrutsinger/binja-codemode-mcp) by Austyn
+Krutsinger. Almost none of that code survives the rewrite, but the idea — let the model
+write Python against Binary Ninja instead of calling a wrapper — came from there.

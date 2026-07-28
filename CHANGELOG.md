@@ -13,8 +13,9 @@ A rewrite.
 
 - **Database changes could be lost on save.** Mutations were applied outside any undo
   transaction, so Binary Ninja's modified-tracking did not fire, the UI did not refresh,
-  and edits could die with the process. Every `execute` now runs inside
-  `bv.undoable_transaction()`.
+  and edits could die with the process. Every `execute` now runs in one undo transaction:
+  a script that raises reverts everything it did, and a batch that succeeds collapses to a
+  single ⌘Z.
 - **Only the first opened binary was reachable.** The server captured a `BinaryView` at
   start and never updated it, so a second tab was invisible and edits could land on a
   stale view. The target is now resolved per request and pinned per session.
@@ -51,12 +52,35 @@ A rewrite.
 
 - Workspace files and saved skills. MCP clients have their own filesystem.
 - `checkpoint` and `rollback` tools.
+- **Headless support, and every platform but macOS.** This targets a running Binary Ninja
+  GUI; a Personal licence forbids headless anyway, so the code paths pretending otherwise
+  were untestable and misleading.
 
 ### Added
 
-- pytest, ruff, and pyright, with 87 tests covering the protocol, transport, execution
-  contract, binary selection, and guide assembly, plus an end-to-end test over a real
-  socket. Python pinned to 3.10 to match Binary Ninja's bundled interpreter.
+- **`h.lib`, a per-session library.** `h.lib["name"] = fn` keeps a function for the rest of
+  the server session; `h.lib.name()` re-runs it against whatever is selected now. It stores
+  functions rather than values, so nothing held can go stale. `print(h.lib)` lists what is
+  saved, `h.lib.name.source` returns its text, `h.lib_sources()` returns all of them, and
+  `del h.lib.name` removes one. Calls remain stateless in every other respect.
+- **Every response is bounded.** One tool result is capped at 40 KB, with the error section
+  reserved inside it, so a script that raises with an enormous message comes back readable
+  instead of unbounded. Output keeps its head, a traceback keeps its tail *and* its first
+  line, so the exception type survives however large its message.
+- **Failures say whether the database was rolled back**, and a timing footer (`[1.4s of
+  30s]`) gives the throughput signal needed to size a batch against the 30-second limit.
+- **Tracebacks quote the line that raised**, rather than giving a line number into code the
+  model has to remember.
+- **A closed target is announced rather than silently replaced.** When the pinned binary is
+  closed, the guide header says so and the next `execute` is refused once, so a script
+  cannot write to a database nobody chose.
+- **Status is reported in a dialog**, not only the log pane, and the server can be started
+  from the status bar with no file open.
+- pytest, ruff, and [ty](https://github.com/astral-sh/ty), with 222 tests covering the
+  protocol, transport, execution contract, binary selection, library, and guide assembly,
+  plus end-to-end tests over a real socket. Python pinned to 3.10 to match Binary Ninja's
+  bundled interpreter. `tests/driver_plan.md` covers what the suite cannot reach — undo
+  behaviour, tab handling, and persistence — by having a model drive a live session.
 
 ## [0.1.3] - 2026-01-08
 
