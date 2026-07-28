@@ -28,17 +28,14 @@ class EchoHandler:
 @pytest.fixture
 def endpoint():
     server = MCPHTTPServer(EchoHandler(), host="127.0.0.1", port=0, api_key=API_KEY)
-    server.start()
-    # port=0 asked the OS for a free port; read back what it actually bound.
-    assert server._server is not None
-    port = server._server.server_address[1]
-    yield f"http://127.0.0.1:{port}/mcp"
+    url = server.start()
+    yield url
     server.stop()
 
 
 def post(
     url: str,
-    body: dict | None = None,
+    body: dict[str, object] | None = None,
     *,
     key: str | None = API_KEY,
     origin: str | None = None,
@@ -116,6 +113,19 @@ class TestRequests:
 
 
 class TestLifecycle:
+    def test_start_returns_the_url_it_actually_bound(self):
+        """With port 0 the OS picks the port, so the requested value is not the
+        real one. Callers get the URL from start(); nothing should have to reach
+        into the server to find out where it is listening."""
+        server = MCPHTTPServer(EchoHandler(), host="127.0.0.1", port=0, api_key=API_KEY)
+        url = server.start()
+        try:
+            assert server.port != 0
+            assert url == f"http://127.0.0.1:{server.port}/mcp"
+            assert post(url, {"jsonrpc": "2.0", "id": 1})[0] == 200
+        finally:
+            server.stop()
+
     def test_stop_returns_promptly(self):
         """stop() is reachable from the status-bar button on the Qt main
         thread, so it must not stall the UI waiting for the poll loop."""

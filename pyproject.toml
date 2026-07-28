@@ -47,3 +47,23 @@ extra-paths = [
     "/Applications/Binary Ninja.app/Contents/Resources/python",
     "/Applications/Binary Ninja.app/Contents/Resources/python3",
 ]
+
+# Editor-only. basedpyright is not a gate and not a project dependency — `make
+# test` type-checks with ty. This block exists so an editor's language server
+# resolves the same imports ty does, instead of reporting the package and the
+# Binary Ninja API as missing.
+[tool.basedpyright]
+pythonVersion = "3.10"
+# basedpyright defaults to a much stricter mode than pyright; `standard` keeps
+# the editor's diagnostics close to what ty reports in the terminal.
+typeCheckingMode = "standard"
+# Two of basedpyright's stricter rules earn their keep; the rest of its
+# `recommended` set is noise here, since `bv` is deliberately untyped.
+reportPrivateUsage = "warning"
+reportMissingTypeArgument = "warning"
+include = ["src", "tests"]
+extraPaths = [
+    "src",
+    "/Applications/Binary Ninja.app/Contents/Resources/python",
+    "/Applications/Binary Ninja.app/Contents/Resources/python3",
+]

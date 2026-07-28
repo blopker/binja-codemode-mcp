@@ -130,6 +130,9 @@ class MCPHTTPServer:
         # must not block status or guide requests behind it.
         self._server = ThreadingHTTPServer((self.host, self.port), handler)
         self._server.daemon_threads = True
+        # Port 0 asks the OS to pick one, and it is only known after binding.
+        # Record it so `port` and the returned URL are the real ones.
+        self.port = self._server.server_address[1]
         self._thread = threading.Thread(
             target=self._server.serve_forever,
             args=(SHUTDOWN_POLL_S,),

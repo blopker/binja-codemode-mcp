@@ -139,6 +139,11 @@ API inside the app bundle. It is pre-1.0, so expect its diagnostics to shift bet
 releases. Write suppressions as a bare `# type: ignore`; ty also accepts
 `# ty: ignore[rule]`.
 
+`pyproject.toml` also carries a `[tool.basedpyright]` block so an editor's language server
+resolves the same imports — the package lives under `src/` and the Binary Ninja API lives
+in the app bundle, so without it both look missing. It is editor-only: not a gate, not a
+dependency. A local `pyrightconfig.json` would override it, and is gitignored.
+
 ### Iterating inside Binary Ninja
 
 `make install` symlinks the package, so edits land immediately — but Python still has the

@@ -23,9 +23,7 @@ def client(tmp_path, tabs):
     config = Config(api_key=KEY, data_dir=tmp_path, port=0)
     backend = PluginBackend(config, tabs_provider=lambda: tabs)
     server = MCPHTTPServer(MCPHandler(backend), host=config.host, port=0, api_key=KEY)
-    server.start()
-    assert server._server is not None
-    url = f"http://127.0.0.1:{server._server.server_address[1]}/mcp"
+    url = server.start()
 
     counter = {"id": 0}
 
