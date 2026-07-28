@@ -14,6 +14,11 @@ from urllib.parse import urlparse
 
 MAX_BODY_BYTES = 8 * 1024 * 1024
 
+# How long shutdown() can block: serve_forever() only notices the stop flag
+# between polls. The stdlib default of 0.5s stalls the Qt main thread when the
+# user clicks the status-bar button to stop the server.
+SHUTDOWN_POLL_S = 0.02
+
 
 def origin_allowed(origin: str | None) -> bool:
     """Reject cross-origin requests.
@@ -127,6 +132,7 @@ class MCPHTTPServer:
         self._server.daemon_threads = True
         self._thread = threading.Thread(
             target=self._server.serve_forever,
+            args=(SHUTDOWN_POLL_S,),
             daemon=True,
             name="binja-mcp-http",
         )

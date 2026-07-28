@@ -5,6 +5,7 @@ a mocked handler would hide.
 """
 
 import json
+import time
 import urllib.error
 import urllib.request
 
@@ -112,6 +113,18 @@ class TestRequests:
     def test_wrong_path_is_404(self, endpoint):
         status, _ = post(endpoint.replace("/mcp", "/execute"), {"id": 1})
         assert status == 404
+
+
+class TestLifecycle:
+    def test_stop_returns_promptly(self):
+        """stop() is reachable from the status-bar button on the Qt main
+        thread, so it must not stall the UI waiting for the poll loop."""
+        server = MCPHTTPServer(EchoHandler(), host="127.0.0.1", port=0, api_key=API_KEY)
+        server.start()
+        started = time.monotonic()
+        server.stop()
+        assert time.monotonic() - started < 0.2
+        assert not server.running
 
 
 class TestUnsupportedMethods:

@@ -14,7 +14,7 @@ setup: ## Install dev dependencies
 	uv sync
 
 test: lint typecheck ## Everything that gates a commit
-	uv run pytest -v --durations=0
+	uv run pytest -v
 
 lint: ## Check formatting and lint rules
 	uv run ruff check .
