@@ -31,7 +31,7 @@ on `bv`; use `h` for the few session-level things, and leave the interface alone
 open handles. Re-derive what you need, or keep intermediate results in your own notes.
 
 **Print what you want back.** `print()` output is the return channel, verbatim. It is
-capped at 100 KB, so filter before printing rather than dumping and hoping.
+capped at 32 KB, so filter before printing rather than dumping and hoping.
 
 **Print addresses as hex.** The API returns ints and the disassembly shows hex; mixing the
 two is an easy way to lose your place. `print(hex(addr))`, always.
@@ -119,6 +119,34 @@ for off in range(0, len(data), 8):
     print(hex(base + off), " ".join(f"{b:02x}" for b in chunk), repr(chunk))
 ```
 
+## Strings, sections, and references
+
+Reading a C string at a pointer — the second argument is a *minimum* length, and the
+default of 4 silently skips short strings:
+
+```python
+s = bv.get_ascii_string_at(ptr, 1)
+print(s.value if s else None)
+```
+
+`bv.sections` is a mapping, not a list, so enumerating needs `.values()`:
+
+```python
+for section in bv.sections.values():
+    print(section.name, hex(section.start), hex(section.end))
+```
+
+Follow **data** references as well as code ones. A pointer table is referenced by data
+refs, so looking only at `get_code_refs` can miss the consumer entirely:
+
+```python
+print([hex(a) for a in bv.get_data_refs(addr, 8)])   # who points at this
+print([hex(a) for a in bv.get_data_refs_from(addr, 8)])  # what this points at
+```
+
+Read comments back with `bv.get_comment_at(addr)`, the same way you read back every other
+write.
+
 ## Recovering data formats
 
 When a blob looks like strings, a table, or an image, read the code that *consumes* it
@@ -131,6 +159,19 @@ func = bv.get_function_at(0x34DCC)
 print(func.name)
 print(str(func.hlil))
 ```
+
+`str(func.hlil)` on a real function is often ten thousand characters, which blows the
+output cap and buries the line you care about. To look at one address, iterate the
+instructions instead:
+
+```python
+func = bv.get_functions_containing(addr)[0]
+for il in func.hlil.instructions:
+    if il.address == addr:
+        print(hex(il.address), il)
+```
+
+Widen it to a window (`abs(il.address - addr) < 0x40`) when you need surrounding context.
 
 After applying a type, print the HLIL again. Named fields and array indexing appearing in
 the output is good evidence that the type matches the access pattern; if the decompiler

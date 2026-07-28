@@ -8,6 +8,7 @@ Pure module: stdlib only, the handler is injected.
 
 import hmac
 import json
+import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
@@ -159,6 +160,22 @@ def _invalid_request(message: str) -> dict[str, Any]:
     return {"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": message}}
 
 
+class _Server(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        """A client hanging up is normal; do not print a traceback for it.
+
+        socketserver's default prints the stack to stderr, which Binary Ninja
+        surfaces in the Log pane where it reads as a plugin crash and buries
+        real messages. Anything unexpected still gets logged, once, as a line.
+        """
+        exc = sys.exc_info()[1]
+        if isinstance(exc, ConnectionError | BrokenPipeError | TimeoutError):
+            return
+        print(f"binja-mcp: error handling {client_address}: {exc!r}", file=sys.stderr)
+
+
 class MCPHTTPServer:
     """Runs the MCP endpoint on a background thread."""
 
@@ -167,7 +184,7 @@ class MCPHTTPServer:
         self.host = host
         self.port = port
         self.api_key = api_key
-        self._server: ThreadingHTTPServer | None = None
+        self._server: _Server | None = None
         self._thread: threading.Thread | None = None
 
     def start(self) -> str:
@@ -176,8 +193,7 @@ class MCPHTTPServer:
         )
         # Threading matters: an execute call can run for the full timeout and
         # must not block status or guide requests behind it.
-        self._server = ThreadingHTTPServer((self.host, self.port), handler)
-        self._server.daemon_threads = True
+        self._server = _Server((self.host, self.port), handler)
         # Port 0 asks the OS to pick one, and it is only known after binding.
         # Record it so `port` and the returned URL are the real ones.
         self.port = self._server.server_address[1]

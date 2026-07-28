@@ -135,6 +135,29 @@ class TestStatus:
         assert status["tabs"] == []
 
 
+class TestStaleTargetRecovery:
+    """Reopening a file is exactly when a model calls binja_guide, so the
+    orientation path must recover a closed target, not just execute()."""
+
+    def _reopened(self, config, bv):
+        other = type(bv)("reopened")
+        open_tabs = [[BinaryTab(0, "target", "/bin/target", bv)]]
+        backend = PluginBackend(config, tabs_provider=lambda: open_tabs[0])
+        backend.execute("pass")  # pins "target"
+        open_tabs[0] = [BinaryTab(0, "reopened", "/bin/reopened", other)]
+        return backend
+
+    def test_status_does_not_claim_nothing_is_open(self, config, bv):
+        status = self._reopened(config, bv).status()
+        assert status["binary"] is not None
+        assert status["binary"]["name"] == "reopened"
+
+    def test_the_guide_header_agrees_with_its_own_tab_list(self, config, bv):
+        header = self._reopened(config, bv).guide(None)
+        assert "No binary is open" not in header
+        assert "(selected)" in header
+
+
 class TestGuide:
     def test_includes_the_live_header(self, backend):
         assert "target" in backend.guide(None)

@@ -69,7 +69,7 @@ class CodeExecutor:
 
     def __init__(
         self,
-        max_output_bytes: int = 100_000,
+        max_output_bytes: int = 32_000,
         timeout: float = 30.0,
     ) -> None:
         self.max_output_bytes = max_output_bytes

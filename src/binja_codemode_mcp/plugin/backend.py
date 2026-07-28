@@ -104,7 +104,11 @@ class PluginBackend:
         try:
             tab = self.session.current()
         except LookupError:
-            tab = None
+            # Recover a stale pin here too, not just in execute(). This is the
+            # orientation call a model makes right after reopening a file, and
+            # reporting "no binary is open" while listing an open tab is both
+            # self-contradictory and the worst possible moment to be wrong.
+            tab = self.session.repin()
 
         try:
             tabs = self.session.describe()

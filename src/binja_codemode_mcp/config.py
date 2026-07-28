@@ -51,7 +51,10 @@ class Config:
     port: int = 42069
     api_key: str = ""
 
-    max_output_bytes: int = 100_000
+    # ~8k tokens. 100 KB fits in memory fine but overruns a client's
+    # per-result budget, which spills the response to a file where the model
+    # cannot see it inline — a cap that prevents a hang but not a lost answer.
+    max_output_bytes: int = 32_000
     execution_timeout_s: float = 30.0
 
     data_dir: Path = field(default_factory=default_data_dir)

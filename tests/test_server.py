@@ -6,6 +6,7 @@ a mocked handler would hide.
 
 import json
 import socket
+import struct
 import time
 import urllib.error
 import urllib.request
@@ -208,6 +209,19 @@ class TestKeepAlive:
                 b"Transfer-Encoding: chunked\r\n\r\n0\r\n\r\n"
             )
             assert b"411" in self._read_response(sk).split(b"\r\n")[0]
+
+
+class TestDisconnects:
+    def test_a_client_hanging_up_prints_no_traceback(self, endpoint, capfd):
+        """socketserver's default dumps a stack to stderr, which Binary Ninja
+        shows in the Log pane where it reads as a plugin crash."""
+        host, port = endpoint.split("//")[1].split("/")[0].split(":")
+        sk = socket.create_connection((host, int(port)), timeout=5)
+        sk.sendall(b"POST /mcp HTTP/1.1\r\nHost: x\r\nContent-Length: 100\r\n\r\n")
+        sk.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+        sk.close()  # RST mid-request
+        time.sleep(0.3)
+        assert "Traceback" not in capfd.readouterr().err
 
 
 class TestLifecycle:

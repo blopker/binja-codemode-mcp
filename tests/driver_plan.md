@@ -152,9 +152,17 @@ driver has not used — defining a struct and applying it to a data variable is 
 different shape than described, or needed an undocumented extra step.
 
 **E2 — what was missing.** Ask the driver: what did you have to discover by trial and
-error that the guide should have told you? What did you assume was unavailable and
-work around? (The last live run found `open()` this way.) These answers are the point of
-the exercise — they become guide edits.
+error that the guide should have told you? What did you assume was unavailable and work
+around? These answers are the point of the exercise — they become guide edits. Previous
+runs surfaced `open()` this way, then HLIL-by-address, `get_ascii_string_at`, `sections`
+being a mapping, `get_comment_at`, and `get_data_refs`; all are documented now, so a
+run that needs none of them is a signal the guide is catching up.
+
+**E3 — orientation after a reopen.** Immediately after B5's save/close/reopen, and again
+after C5's tab close, call `binja_guide` *before* any `execute`. Expect the header to
+name a binary and mark a tab `(selected)`. A header that says no binary is open while
+listing one is a contradiction the model reads at the moment it is least sure of its
+target.
 
 ---
 

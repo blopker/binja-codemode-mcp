@@ -131,6 +131,18 @@ class TestGuideContent:
         assert "30-second limit" in text
         assert "reverted when it eventually finishes" in text
 
+    def test_covers_the_idioms_a_live_run_had_to_discover(self):
+        """Each of these cost round trips in a real session."""
+        text = GUIDE_PATH.read_text()
+        for idiom in (
+            "func.hlil.instructions",  # locating one address in a big body
+            "get_ascii_string_at",  # reading a C string at a pointer
+            "bv.sections.values()",  # sections is a mapping
+            "get_comment_at",  # reading a comment back
+            "get_data_refs",  # a pointer table has data refs, not code refs
+        ):
+            assert idiom in text, idiom
+
     def test_warns_against_touching_qt(self):
         """Scripts run on a worker thread; Qt from off the main thread
         segfaults Binary Ninja, and nothing stops the model trying."""

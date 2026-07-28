@@ -29,7 +29,7 @@ open tabs, and the API calls that behave surprisingly.
 Each `execute` runs in one undo transaction: if the script raises, every change it made
 is reverted, so a failed batch leaves no partial state. Each call is independent — no
 variables persist between calls. `print()` is the return channel and is capped at
-100 KB, so filter before printing. Print addresses as hex.
+32 KB, so filter before printing. Print addresses as hex.
 
 Only make database changes you are confident in; record ambiguity in a comment instead
 of guessing."""
@@ -41,7 +41,7 @@ every edit — reading bytes, decompiling, renaming, applying types, adding comm
 Globals: `bv` (real BinaryView), `bn` (binaryninja module), `h` (helpers:
 `h.binaries()`, `h.select(index_or_name)`). Real builtins and imports work.
 
-Return values via `print()`; output is verbatim and capped at 100 KB. Print
+Return values via `print()`; output is verbatim and capped at 32 KB. Print
 addresses as hex. Do NOT iterate every function and decompile — filter to a
 handful first, or you will blow the cap and the time limit.
 
