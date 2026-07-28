@@ -56,6 +56,17 @@ Prefer `bv.read()` for anything mapped, since it resolves virtual addresses and 
 the analysis; use the file directly when you need bytes the view does not cover, or when
 you need a second binary that is not open in Binary Ninja.
 
+Two ways the file on disk disagrees with the view, both silent — no error, just bytes
+that are wrong in a plausible way:
+
+- **`seg.data_offset` is relative to the Mach-O slice, not the file.** `/bin/ls` is
+  universal; reading at `data_offset` lands in the *other* architecture's slice. Add the
+  slice offset from the fat header, or stay on `bv.read`.
+- **Chained fixups are resolved in the view and encoded on disk.** A pointer slot in
+  `__got` / `__auth_got` reads as `0x100018160` through `bv.read` and as
+  `0xc009000000000000` straight from the file. Unpacking raw file bytes hunting for
+  pointers finds none of them, which looks exactly like "there is no table here".
+
 **Do not iterate every function and decompile it.** On a few thousand functions that is
 minutes of analysis and far more output than fits. Filter to a handful first, then look
 closely:
@@ -219,7 +230,8 @@ Three that reliably cost a round trip:
   it is `t.members`; `t.enumeration.members` fails with `'function' object has no
   attribute 'members'`.
 - `Segment` has no `.flags`. What you want after a raw-file diff is `seg.data_offset` and
-  `seg.data_length`, which map file offsets to virtual addresses.
+  `seg.data_length`, which map file offsets to virtual addresses — within the slice, so
+  see the fat-binary caveat under *Environment* before indexing a file with them.
 
 ## Strings, sections, and references
 
@@ -230,6 +242,11 @@ default of 4 silently skips short strings:
 s = bv.get_ascii_string_at(ptr, 1)
 print(s.value if s else None)
 ```
+
+`bv.strings` has the same floor, and there it is the `analysis.limits.minStringLength`
+setting rather than an argument — default 4, so scanning it for two- and
+three-character strings returns nothing at all. Split the raw section bytes on NULs when
+you need those.
 
 `bv.sections` is a mapping, not a list: iterate `bv.sections.values()` for `.name`,
 `.start`, `.end`.
@@ -265,11 +282,16 @@ instructions instead:
 ```python
 func = bv.get_functions_containing(addr)[0]
 for il in func.hlil.instructions:
-    if il.address == addr:
+    if abs(il.address - addr) < 0x40:
         print(hex(il.address), il)
 ```
 
-Widen it to a window (`abs(il.address - addr) < 0x40`) when you need surrounding context.
+**Use the window, not `il.address == addr`.** HLIL folds runs of machine instructions
+onto a subset of addresses: on a 133-function Mach-O, 61% of disassembly addresses have
+no HLIL instruction of their own. An address taken from disassembly, a cross-reference,
+or a string reference usually matches nothing, and an exact-match loop that finds nothing
+reads as "there is no code here" rather than "wrong query". Narrow to `==` only once the
+window has shown you an address HLIL actually renders at.
 
 After applying a type, print the HLIL again. Named fields and array indexing appearing in
 the output is good evidence that the type matches the access pattern; if the decompiler

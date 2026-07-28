@@ -1,294 +1,220 @@
 # Live driver plan
 
-A script for an LLM connected to this server to run against a real Binary Ninja
-session. It covers what the pytest suite cannot: the plugin never touches Binary Ninja
-in the automated tests, so every claim about transactions, tab handling, and the UI is
+A script for an LLM connected to this server to run against a real Binary Ninja session.
+It covers what the pytest suite cannot: the plugin never touches Binary Ninja in the
+automated tests, so every claim about transactions, tab handling, and the UI is
 unverified until something runs here.
 
-Give this file to the driver, ask it to work through the cases in order, and have it
-report using the format at the end. Cases marked **[human]** need someone looking at the
-window; the driver should say what to check and stop for an answer.
+The human is needed twice — **Setup** and **Checkpoint** — and not in between. Do not
+scatter extra questions through the run.
 
-## Setup
+**Never write GUI code.** Scripts run on a worker thread; calling into Qt or
+`binaryninjaui` crashes Binary Ninja and loses unsaved analysis. Nothing prevents it. If a
+case seems to need the interface, record it as a gap.
 
-Do not run this against work you care about. Make throwaway copies, from the repo root:
+Record any traceback, unexpected tool error, or disagreement between a tool and the UI as
+a failure rather than working around it. The workaround is the finding.
+
+Pass `topic` to `binja_guide` except where told otherwise — the full guide is ~9 KB a call.
+
+---
+
+## Setup — everything the human does, first
+
+Cleanup happens here rather than at the end, so a run that stops partway leaves its
+databases intact to inspect and the *next* run clears them. Close any tabs left over from
+a previous run first — this deletes the files they are open on. Then, from the repo root:
 
 ```sh
-rm -rf scratch/driver
-mkdir -p scratch/driver
+rm -rf scratch/driver && mkdir -p scratch/driver
 cp /bin/ls scratch/driver/ls-a
 cp /bin/ls scratch/driver/ls-b
-cp /bin/cat scratch/driver/other
 ```
 
-`scratch/` is gitignored, so the copies and the `.bndb` files Binary Ninja writes next to
-them stay out of the repo.
+That removes the previous run's copies and the `.bndb` files Binary Ninja wrote beside
+them. Reports at the `scratch/` root are left alone.
 
-Open `scratch/driver/ls-a` in Binary Ninja, let analysis finish, and start the server
-(`Plugins > Code Mode MCP > Start Server`). Leave `ls-b` and `other` closed for now.
+Then, in one pass:
 
-**Never write GUI code.** Scripts run on a worker thread, and calling into Qt or
-`binaryninjaui` from off the main thread crashes Binary Ninja and loses unsaved analysis.
-Nothing in the plugin prevents it. If a case seems to need the interface, record it as a
-gap instead of reaching for `UIContext`.
+1. **With no file open**, click the status-bar indicator: it should read Running, and
+   clicking again should stop it. Confirm `Plugins > Code Mode MCP` lists all three
+   entries with nothing loaded.
+2. Open `scratch/driver/ls-a` **and** `scratch/driver/ls-b`, let both finish analysing.
+3. Start the server.
 
-**Watch for the window jumping.** Binary Ninja coming to the foreground mid-run is under
-investigation (section F). Whoever is at the keyboard should keep another window focused
-between cases and note *which* calls pull Binary Ninja forward. This is the one thing
-easier to see than to test.
-
-The driver should treat any Python traceback, any tool error it did not expect, and any
-disagreement between what a tool reports and what the UI shows as a failure worth
-recording rather than working around.
+Report those three results, then leave it alone until the Checkpoint.
 
 ---
 
 ## A. Orientation
 
-**A0 [human] — the server starts with no file open.** Before opening anything, ask the
-user to click the status-bar indicator, confirm it reads Running, click it again to stop,
-and confirm the Plugins menu lists all three Code Mode MCP entries with no binary loaded.
-Then start the server and open `ls-a`. Skip if the session is already running.
+**A1 — the guide describes the live session.** Call `binja_guide` with no `topic` (the one
+case that wants the whole document). Expect the header to name `ls-a`, a Mach-O view, an
+architecture, a non-zero function count, "Analysis: complete", a version, and two open tabs
+with one marked selected. Any `?`, `0`, or `unknown` is a failure.
 
-**A1 — the guide describes the live session.** Call `binja_guide`.
-Expect: the header names `ls-a`, a Mach-O view, an architecture, a non-zero function
-count, "Analysis: complete", a Binary Ninja version, and one open tab marked selected.
-Fail if any field reads `?`, `0`, `unknown`, or names a different binary.
+**A2 — the globals are real.** `print(type(bv).__module__, type(bv).__name__)`,
+`bn.core_version()`, `h.binaries()`. Expect `binaryninja.binaryview BinaryView`, a version,
+and two entries. `bn` as `None` means the module never reached the script.
 
-**A2 — the globals are real.** One `execute`:
-```python
-print(type(bv).__module__, type(bv).__name__)
-print(bn.core_version())
-print(h.binaries())
-```
-Expect `binaryninja.binaryview BinaryView`, a version string, and a one-entry list with
-`selected: True`. Fail if `bn` is `None` — that would mean the module never reached the
-script.
+**A3 — ordinary Python works.** One script importing `struct`, using a comprehension, and
+defining a nested function that reads a top-level name. Expect no `NameError` — this is the
+scoping bug that used to force `global` workarounds.
 
-**A3 — ordinary Python works.** One `execute` that imports `struct` and `re`, uses a
-comprehension, and defines a nested function that reads a name bound at the top level.
-Expect no `NameError`. This is the scoping bug that used to force `global` workarounds.
-
-**A4 — the filesystem is reachable.** Read the raw file and compare against the view:
-```python
-raw = bv.file.original_filename
-with open(raw, "rb") as f:
-    head = f.read(16)
-print(raw, head.hex())
-print(bv.read(bv.start, 16).hex())
-```
-Expect both to print. They need not match — the view is mapped, the file is not.
+**A4 — the filesystem is reachable.** Read `bv.file.original_filename` and print its first
+16 bytes alongside `bv.read(bv.start, 16)`. Both must print; they need not match.
 
 ## B. Transactions — the reason this rewrite exists
 
 **B1 — a successful batch lands.** Rename five `sub_*` functions to `driver_test_0..4`.
-Read them back in a *second* `execute`. Expect the new names.
+Read them back in a *second* call.
 
-**B2 — a failing batch leaves nothing behind.** *The single most important case here.*
-In one `execute`, rename three more functions and then `raise ValueError("boom")`. Expect
-the tool to report the error. Then, in a second `execute`, read those three addresses
-back: expect their **original** names.
+**B2 — a failing batch leaves nothing behind.** *The most important case here.* In one
+call, rename three more functions and then `raise ValueError("boom")`. In a second call,
+read those three addresses back: expect their **original** names.
 
-This silently regressed once: an optimisation gated the revert on `bv.file.modified`,
-which does not move when a script mutates, so failed scripts kept their changes. It was
-found by hand, not by the suite. Any renamed function here is a partial-state failure and
-the most serious possible result.
+This regressed silently once — an optimisation gated the revert on `bv.file.modified`,
+which does not move when a script mutates — and was found by hand, not by the suite. Any
+renamed function here is a partial-state failure and the most serious possible result.
 
-**B3 [human] — the UI reflects it, with nothing driving it.** Ask: does the function list
-show `driver_test_0` without clicking away and back? This is now the *only* check on view
-updates — the plugin used to force a refresh after every call and no longer does, on the
-theory that undo-registered changes propagate on their own. A stale list here means that
-theory is wrong and the refresh has to come back.
-
-**B4 [human] — one undo step.** Ask the user to press ⌘Z once and say what happened.
-Expect all five B1 renames to revert together. Five presses to undo five renames means
-the batch is not one transaction. Ask them to ⌘⇧Z (redo) back before continuing.
-
-**B5 [human] — it survives a save.** Ask the user to save (⌘S), close the tab, and
-reopen the `.bndb`. Then call `binja_guide` and read the five names back. Expect them to
-persist. This is the exact failure the rewrite targets: edits that looked applied and
-vanished on save.
+**B3 — one undo step.** `bv.undo()` from a script is what ⌘Z does. Undo once, then read
+the five B1 names back: expect all five reverted **together**. Needing five undos for five
+renames would mean the batch is not one transaction. `bv.redo()` and confirm they return.
 
 ## C. Multiple binaries
 
-**C1 — the target is stable across calls.** Run three `execute` calls in a row that each
-print `bv.file.filename`. Expect the same path all three times. A "no longer open" error
-on call two would mean the session cannot hold a target at all.
+**C1 — the pin is stable and does not follow focus.** Print `bv.file.filename` in three
+consecutive calls: expect the same path each time, and `ls-a` even though `ls-b` is also
+open. A "no longer open" error here means the session cannot hold a target at all.
 
-**C2 [human] — open a second binary.** Ask the user to open `scratch/driver/ls-b` in a
-new tab and let it analyse. Then call `h.binaries()`: expect two entries, with `ls-a`
-still `selected: True`.
+**C2 — select and edit in one script.** The case that failed in the first live run:
 
-**C3 — the pin survives the user switching tabs.** Ask the user to click the `ls-b` tab.
-Without any `h.select`, run `print(bv.file.filename)`. Expect `ls-a` — the model's target
-must not follow the user's focus.
-
-**C4 — select and edit in one script.** This is the case that failed in the first live
-run. One `execute`:
 ```python
 print(h.select("ls-b"))
 print(bv.file.filename)
 bv.get_function_at(bv.entry_point).name = "driver_selected_here"
 ```
-Expect the printed filename to be `ls-b` and the rename to land in `ls-b`. Verify in a
-second call that `ls-a`'s entry function is untouched. A rename landing in `ls-a` while
-the tool reports success is a wrong-database write — record it as critical.
 
-**C5 [human] — a closed target recovers.** With `ls-b` selected, ask the user to close
-the `ls-b` tab. Then `execute` anything. Expect one error saying the selected binary is
-no longer open and naming the binary now selected, and expect the *next* `execute` to
-succeed. A session that stays dead after this is a failure.
+Expect `ls-b` both times, and verify in a second call that `ls-a`'s entry function is
+untouched. A rename landing in `ls-a` while the tool reports success is a wrong-database
+write — record it as critical. **Leave `ls-b` selected**; the Checkpoint depends on it.
 
 ## D. Limits and failure modes
 
 **D1 — output is capped, and the cap is usable.** `print("x" * 500000)`. Expect truncated
-output with a note, no hang, no dropped response. Then answer the part that matters: did
-the truncated result appear **inline**, or did the client spill it to a file? The cap
-dropped from 100 KB to 32 KB precisely because 100 KB was being spilled and never read.
-If 32 KB still spills, say so — the number needs to come down again.
+output with a note. Then the part that matters: did it arrive **inline**, or did the client
+spill it to a file? The cap dropped from 100 KB to 32 KB because 100 KB was being spilled
+and never read. If 32 KB still spills, say so.
 
-**D2 — the timeout discards its work.** One `execute`:
-```python
-import time
-bv.get_function_at(bv.entry_point).name = "driver_timeout_probe"
-time.sleep(45)
-```
-Expect a timeout error after ~30s saying the batch was discarded. Then wait ~20s and, in
-a new `execute`, read that function's name: expect the **original** name. If
-`driver_timeout_probe` is there, an abandoned script committed after its call had already
-reported failure.
+**D2 — the timeout discards its work, and overlap is refused.** One call that renames the
+entry function to `driver_timeout_probe` then `time.sleep(45)`. While it sleeps, send a
+second call: expect "a previous script is still running", not a hang. Expect the first to
+time out at ~30s saying the batch was discarded. Wait ~20s, then read the name back: expect
+the **original**. `driver_timeout_probe` surviving means an abandoned script committed
+after its call had already reported failure.
 
-**D3 — overlap is refused, not interleaved.** Immediately after starting D2 (while it is
-still sleeping), send a second `execute`. Expect a clear "a previous script is still
-running" error rather than a hang or a second transaction.
+**D3 — failures are clean and readable.** Three calls: a syntax error, an `AttributeError`,
+and `raise ValueError("x" * 500_000)`. Expect useful messages, a bounded result naming
+`ValueError` that arrives inline rather than spilled, the timing footer intact, and the
+endpoint still serving. The large error is the gap that let an unbounded traceback ship.
 
-**D4 — a bad script fails cleanly.** Send a syntax error and an
-`AttributeError`-producing line in separate calls. Expect useful messages, no server
-crash, and the endpoint still responding afterwards.
+**D4 — a rollback is stated.** Rename a function and raise in the same script. Expect a
+rollback note, and a second call confirming the original name. Every failure reverts and
+says so, including one that changed nothing — there is no reliable way to tell, so the note
+is vacuous rather than absent.
 
-**D5 — removing a function makes it stay removed.** The guide was corrected to say
-`remove_user_function`, not `remove_function`, because the latter is an auto-level action
-that analysis undoes. Verify on a real function:
-
-```python
-f = bv.get_functions_containing(bv.entry_point)[0]
-addr, name = f.start, f.name
-bv.remove_user_function(f)
-print("gone?", bv.get_function_at(addr) is None)
-bv.update_analysis_and_wait()
-print("still gone after reanalysis?", bv.get_function_at(addr) is None)
-print(addr, name)
-```
-
-Expect `True` both times. A `False` on the second means the removal did not stick and the
-guide's advice is still wrong. Ask the user to ⌘Z afterwards, and confirm the function
-returns.
-
-**D6 — a failing script returns a readable error.** `raise ValueError("x" * 500_000)`.
-Expect a bounded result that names `ValueError`, arrives **inline** rather than spilled to
-a file, and ends with the timing footer. Section D covered the output cap but never a
-large error, which is the gap that let an unbounded traceback ship.
-
-**D7 — a rollback is stated.** Rename a function and then raise in the same script.
-Expect the error to carry a rollback note, and a second call to confirm the original
-name. Every failure reverts and every failure says so, including one that changed
-nothing — there is no reliable way to tell, so the note is vacuous rather than absent.
-
+**D5 — a removed function stays removed.** `remove_user_function`, not `remove_function`:
+the latter is an auto-level action analysis undoes. Remove a real function, check
+`get_function_at` is `None`, `update_analysis_and_wait()`, check again. Expect `True` both
+times, then `bv.undo()` and confirm it returns.
 
 ## E. Guidance quality
 
-**E1 — the guide's advice is followable.** Pick one workflow from `binja_guide` the
-driver has not used and follow it literally. Four sections are new since the last run and
-none has been exercised: *Working across two databases*, *User annotations vs
-auto-analysis*, *Diffing two builds*, and *Strings, sections, and references*. The
-cross-database port is the most valuable to try, and needs both `ls-a` and `ls-b` open. Along the way, use the idioms added after the last run and say
-whether each did what the guide claims: locating one instruction via
-`func.hlil.instructions` filtered on `il.address`, `bv.get_ascii_string_at(ptr, 1)`,
-`bv.sections.values()`, `bv.get_comment_at`, and `bv.get_data_refs`. Record any step where the documented call errored, returned a
-different shape than described, or needed an undocumented extra step.
+**E1 — the guide's advice is followable.** Pick a workflow from `binja_guide` you have not
+used and follow it literally. Untested since they were written: *Working across two
+databases* (the most valuable — needs both tabs, so do it before the Checkpoint), *User
+annotations vs auto-analysis*, and *Diffing two builds*. Also check the four claims added
+after the last run, each measured rather than guessed:
 
-**E2 — what was missing.** Ask the driver: what did you have to discover by trial and
-error that the guide should have told you? What did you assume was unavailable and work
-around? These answers are the point of the exercise — they become guide edits. Previous
-runs surfaced `open()` this way, then HLIL-by-address, `get_ascii_string_at`, `sections`
-being a mapping, `get_comment_at`, and `get_data_refs`; all are documented now, so a
-run that needs none of them is a signal the guide is catching up.
+- the HLIL **window** rather than `il.address == addr` (61% of disassembly addresses have
+  no HLIL instruction of their own)
+- `bv.strings` floors at `analysis.limits.minStringLength`, default 4
+- `seg.data_offset` is slice-relative — reading `/bin/ls` at it lands in the other slice
+- chained fixups are resolved by `bv.read` and encoded in the file on disk
 
-**E3 — orientation after a reopen.** Immediately after B5's save/close/reopen, and again
-after C5's tab close, call `binja_guide` *before* any `execute`. Expect the header to
-name a binary and mark a tab `(selected)`. A header that says no binary is open while
-listing one is a contradiction the model reads at the moment it is least sure of its
-target.
-
-## F. Interruption (known behaviour — confirm, do not investigate)
-
-A failed script pulls Binary Ninja to the foreground. This is understood and accepted:
-every failure reverts its undo transaction, and `revert_undo_actions` raises the window
-even when the transaction recorded nothing. Isolated against a live instance — an empty
-*commit* is silent, an empty *revert* pops. Skipping the revert is what caused the B2
-regression, so it stays.
-
-Keep another application focused and confirm the pattern still matches. Report F1–F3 as
-a three-line yes/no table.
-
-**F1 — a read on a clean file.** `print(len(bv.functions))`. Expect **no** pop: nothing
-is reverted.
-
-**F2 — a failure that changed nothing.** `print(bv.no_such_attribute)`. Expect a pop.
-Annoying, documented, not a bug.
-
-**F3 — a successful rename.** Expect at most one pop, from the commit and redraw.
-
-Anything that pops *outside* this pattern — a `binja_guide` call, a read that settles
-nothing — is new and worth reporting.
-
+**E2 — what was missing.** What did you discover by trial and error that the guide should
+have told you? What did you assume was unavailable and work around? These become guide
+edits. A run needing none of the previously surfaced idioms is the signal it has caught up.
 
 ## G. The per-session library
 
-New and unproven. The question this section answers is not "does it work" — the suite
-covers that — but **does a model reach for it unprompted, and does it change how the work
-goes**. Run G1–G6 as checks, then answer G7 honestly, including "I ignored it".
+New and unproven. The question is not "does it work" — the suite covers that — but **does
+a model reach for it unprompted**.
 
-**G1 — save and reuse.** Define a function in one call, save it with
-`h.lib["name"] = fn`, call it in a later call. Confirm the result footer lists it as
-`| lib: name`.
+**G1 — save, reuse, inspect.** Define a function, save it with `h.lib["name"] = fn`, call
+it in a later call, and confirm the footer lists it. Then `print(h.lib)`,
+`h.lib.<name>.source`, `h.lib_sources()`, `del h.lib.<name>`.
 
-**G2 — the rebinding.** Save a function that returns `bv.file.filename`. Call it, then
-`h.select` the other binary and call it again. The two answers must differ. This is the
-entire premise: a stored function that reported the first binary forever would be exactly
-the staleness it exists to avoid.
+**G2 — the rebinding.** Save a function returning `bv.file.filename`. Call it, `h.select`
+the other binary, call it again: the answers must differ. A stored function reporting the
+first binary forever is exactly the staleness this exists to avoid. Also confirm a saved
+function's `print()` output comes back in the calling script's result.
 
-**G3 — output from inside.** A saved function that calls `print()` must have its output
-come back in the calling script's result, not vanish.
+**G3 — what it carries, what it refuses.** A script that does `import json` at the top and
+saves a function using it must still work several calls later. These must each fail with a
+message saying why: a closure, `h.lib["d"] = json.dumps`, and `h.lib["c"] = 5`.
 
-**G4 — the refusals.** Each of these must fail with a message that says why:
-a function closing over a value (`def outer(): captured = bv; def inner(): ...`), an
-imported function (`h.lib["d"] = json.dumps`), and a non-function (`h.lib["c"] = 5`).
-Report whether the message told you what to do instead. Then confirm the opposite case
-works: a script that does `import json` at the top and saves a function using it must
-still work when that function is called several scripts later.
+**G4 — error quality.** Failures now report the *line* that raised, not just its number.
+Confirm on an ordinary failure, then on a raise inside a function saved 15+ calls earlier —
+the second is where the source has to be republished from the library.
 
-**G5 — inspect and remove.** `print(h.lib)`, `h.lib.<name>.source`, `h.lib_sources()`,
-then `del h.lib.<name>`. Confirm the listing shows signatures and docstrings and that the
-source is the text you saved.
+**G5 — was it worth it?** Did you save anything without being told to? Call a saved
+function more than once? If you re-emitted the same code across calls instead of saving it,
+say so — that is the outcome that would retire the feature.
 
-**G6 — error quality.** Scripts now report the *line* that raised, not just its number.
-Confirm on an ordinary failure, then on a raise inside a function saved 15+ calls earlier
-— the second is the case where the source has to be republished from the library.
+---
 
-**G7 — was it worth it?** Did you save anything without being told to? Did you call a
-saved function more than once? If you re-emitted the same code across calls instead of
-saving it, say so — that is the outcome that would retire the feature. Note also whether
-the footer listing was noise or useful.
+## Checkpoint — the only interruption
+
+Ask for all of this in one message, then stop.
+
+1. Does the function list show `driver_test_0` **without** clicking away and back? This is
+   the only remaining check on view updates: the plugin used to force a refresh and no
+   longer does, on the theory that undo-registered changes propagate on their own.
+2. Close the **`ls-b`** tab.
+3. Save `ls-a` (⌘S), close its tab, reopen the `.bndb`.
+4. Keep another application focused for the rest of the run and note which calls pull
+   Binary Ninja forward. Report that once, at the end.
+
+## F. After the Checkpoint
+
+**F1 — a closed target is reported, once.** `ls-b` was selected and is now gone. Call
+`binja_guide` *first*: the header must carry a `NOTE:` naming what closed and what is
+selected now. Then `execute`: it must be refused once with the same fact, and the call
+after that must succeed. Both halves matter — the guide call used to absorb the notice, and
+the next script then wrote to a database nobody had chosen, silently.
+
+**F2 — edits survive a save.** Read the five `driver_test_*` names back from the reopened
+`ls-a`. This is the exact failure the rewrite targets: edits that looked applied and
+vanished on save.
+
+**F3 — the window pop.** A failed script pulls Binary Ninja to the foreground: every
+failure reverts its transaction, and an empty revert pops where an empty commit is silent.
+Documented, accepted, not a bug. Run these one at a time and collect the human's single
+answer: `print(len(bv.functions))` (expect no pop), `print(bv.no_such_attribute)` (expect a
+pop), and a successful rename (at most one). Anything popping outside this pattern is new.
 
 ---
 
 ## Report format
 
-Report F1–F3 as a three-line yes/no table; everything else as `PASS`, `FAIL`, or
-`SKIPPED (reason)`. For a failure, give the exact code
-sent, the exact response, and what was expected. Do not fix, retry differently, or work
-around a failure before recording it — the workaround is the finding.
+Write the report to `scratch/driver-run-<timestamp>.md` — `date +%Y-%m-%d-%H%M` for the
+timestamp — and summarise it in chat. At the scratch root, not `scratch/driver/`, so
+Cleanup does not delete it. `scratch/` is gitignored; the findings worth keeping get
+copied out and folded into `guide.md`.
+
+`PASS`, `FAIL`, or `SKIPPED (reason)` per case, plus F3 as a three-line yes/no table. For a
+failure give the exact code sent, the exact response, and what was expected.
 
 Finish with:
 
@@ -296,12 +222,5 @@ Finish with:
 - Anything that cost more round trips than it should have.
 - Whether you would trust this to make changes to a database you cared about, and why.
 
-## Cleanup
-
-Close the tabs in Binary Ninja first, then:
-
-```sh
-rm -rf scratch/driver
-```
-
-That removes the copies and any `.bndb` files written beside them.
+Leave the tabs and the databases as they are. Setup clears them at the start of the next
+run, which is what makes a half-finished run inspectable.

@@ -36,6 +36,16 @@ def render_header(status: dict[str, Any]) -> str:
     """One-screen orientation block describing the live session."""
     lines: list[str] = []
 
+    switched = status.get("switched")
+    if switched:
+        # First line, before the binary it describes: the model is reading this
+        # precisely because something changed under it.
+        lines.append(
+            f"NOTE: {switched['from']} is no longer open — now selected: "
+            f"{switched['to']}. Your next script will be refused once so you "
+            "can confirm the target before writing."
+        )
+
     binary = status.get("binary")
     if binary:
         lines.append(

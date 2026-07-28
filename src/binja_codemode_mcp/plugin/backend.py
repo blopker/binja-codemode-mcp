@@ -348,12 +348,30 @@ class PluginBackend:
             tab = self.session.repin()
             if tab is None:
                 return ExecutionResult(success=False, output="", error=str(e))
+            self.session.take_switch()  # this message is the notice
             return ExecutionResult(
                 success=False,
                 output="",
                 error=(
                     f"{e} Selected [{tab.index}] {tab.name} instead — "
                     "re-run your script, or call h.select() to choose another."
+                ),
+            )
+
+        # A guide call re-pins too, and used to consume the switch on the way
+        # past — leaving the next script to run against a database nobody chose,
+        # with nothing in the response to say so. Refuse once, exactly as the
+        # direct path does, so the caller that is about to write is the one told.
+        switch = self.session.take_switch()
+        if switch is not None:
+            dropped, now = switch
+            return ExecutionResult(
+                success=False,
+                output="",
+                error=(
+                    f"The selected binary ({dropped}) is no longer open. "
+                    f"Selected [{now.index}] {now.name} instead — re-run your "
+                    "script, or call h.select() to choose another."
                 ),
             )
 
@@ -388,11 +406,16 @@ class PluginBackend:
         except LookupError:
             tabs = []
 
+        # Peeked, never taken: the header saying so does not excuse the next
+        # execute from saying so too.
+        switch = self.session.pending_switch()
+
         return {
             "binja_version": self._binja_version(),
             "tabs": tabs,
             "binary": _describe_binary(tab.bv, tab.name) if tab else None,
             "endpoint": self.config.endpoint,
+            "switched": {"from": switch[0], "to": switch[1].name} if switch else None,
         }
 
     def _binja_version(self) -> str | None:

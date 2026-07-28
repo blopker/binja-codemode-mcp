@@ -51,6 +51,7 @@ class BinarySession:
         self._tabs_provider = tabs_provider
         self._pinned: Any = None
         self._pinned_name: str | None = None
+        self._switch: tuple[str, BinaryTab] | None = None
 
     def tabs(self) -> list[BinaryTab]:
         return self._tabs_provider()
@@ -80,15 +81,33 @@ class BinarySession:
 
         Used when the pinned binary was closed: retargeting silently would be
         wrong mid-analysis, but leaving the session permanently unusable is
-        worse, so the caller reports what happened.
+        worse, so the switch is recorded for the caller to report.
         """
+        dropped = self._pinned_name
         self._pinned = None
         self._pinned_name = None
         tabs = self.tabs()
         if not tabs:
             return None
         self._pin(tabs[0])
+        if dropped is not None:
+            self._switch = (dropped, tabs[0])
         return tabs[0]
+
+    def pending_switch(self) -> tuple[str, BinaryTab] | None:
+        """A retarget nobody has been told about yet. Does not clear it."""
+        return self._switch
+
+    def take_switch(self) -> tuple[str, BinaryTab] | None:
+        """The same, claiming it — for whoever puts it in front of the model.
+
+        Split from `pending_switch` so the guide can mention the switch without
+        consuming it: the caller that matters is the one about to write, and a
+        notice the guide swallowed is how a script ended up editing a database
+        nobody chose.
+        """
+        switch, self._switch = self._switch, None
+        return switch
 
     def select(self, key: int | str) -> BinaryTab:
         """Pin a binary by tab index or by (partial) name."""

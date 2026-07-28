@@ -156,6 +156,62 @@ class TestGuide:
         assert len(backend.guide("Types")) < len(backend.guide(None))
 
 
+class TestTargetSwitchNotice:
+    """Closing the pinned tab re-pins, and whichever call arrives first
+    consumes that. When it is `binja_guide` — which is exactly what the guide
+    tells a model to do after a tab closes — the notice was thrown away and the
+    next script wrote to a database nobody chose, silently.
+    """
+
+    def _pin_then_close(self, config, bv):
+        other = type(bv)("other")
+        open_tabs = [
+            [
+                BinaryTab(0, "target", "/bin/target", bv),
+                BinaryTab(1, "other", "/bin/other", other),
+            ]
+        ]
+        backend = PluginBackend(config, tabs_provider=lambda: open_tabs[0])
+        backend.execute('h.select("other")')
+        open_tabs[0] = [BinaryTab(0, "target", "/bin/target", bv)]
+        return backend
+
+    def test_the_guide_header_reports_the_switch(self, config, bv):
+        header = self._pin_then_close(config, bv).guide(None)
+        assert "no longer open" in header
+        assert "other" in header
+
+    def test_a_script_after_a_guide_call_is_still_refused_once(self, config, bv):
+        backend = self._pin_then_close(config, bv)
+        backend.guide(None)
+        result = backend.execute("bv.rename('should_not_land')")
+        assert not result.success
+        assert "no longer open" in (result.error or "")
+        assert bv.renames == []
+
+    def test_the_notice_is_delivered_once_not_forever(self, config, bv):
+        backend = self._pin_then_close(config, bv)
+        backend.guide(None)
+        backend.execute("pass")
+        result = backend.execute("bv.rename('lands')")
+        assert result.success
+        assert bv.renames == ["lands"]
+
+    def test_the_direct_path_does_not_report_it_twice(self, config, bv):
+        backend = self._pin_then_close(config, bv)
+        assert not backend.execute("bv.rename('a')").success
+        assert backend.execute("bv.rename('b')").success
+        assert bv.renames == ["b"]
+
+    def test_an_untouched_session_reports_no_switch(self, config, bv):
+        backend = PluginBackend(
+            config, tabs_provider=lambda: [BinaryTab(0, "target", "/bin/target", bv)]
+        )
+        backend.execute("pass")
+        assert "no longer open" not in backend.guide(None)
+        assert backend.execute("bv.rename('fine')").success
+
+
 class TestLibrary:
     """`h.lib`: functions saved for the rest of the server session.
 
