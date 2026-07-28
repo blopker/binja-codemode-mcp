@@ -31,6 +31,11 @@ Open `scratch/driver/ls-a` in Binary Ninja, let analysis finish, and start the s
 Nothing in the plugin prevents it. If a case seems to need the interface, record it as a
 gap instead of reaching for `UIContext`.
 
+**Watch for the window jumping.** Binary Ninja coming to the foreground mid-run is under
+investigation (section F). Whoever is at the keyboard should keep another window focused
+between cases and note *which* calls pull Binary Ninja forward. This is the one thing
+easier to see than to test.
+
 The driver should treat any Python traceback, any tool error it did not expect, and any
 disagreement between what a tool reports and what the UI shows as a failure worth
 recording rather than working around.
@@ -38,6 +43,11 @@ recording rather than working around.
 ---
 
 ## A. Orientation
+
+**A0 [human] — the server starts with no file open.** Before opening anything, ask the
+user to click the status-bar indicator, confirm it reads Running, click it again to stop,
+and confirm the Plugins menu lists all three Code Mode MCP entries with no binary loaded.
+Then start the server and open `ls-a`. Skip if the session is already running.
 
 **A1 — the guide describes the live session.** Call `binja_guide`.
 Expect: the header names `ls-a`, a Mach-O view, an architecture, a non-zero function
@@ -78,8 +88,11 @@ functions and then `raise ValueError("boom")`. Expect the tool to report the err
 Then, in a second `execute`, read those three addresses back: expect their **original**
 names. Any renamed one is a partial-state failure and the most serious possible result.
 
-**B3 [human] — the UI reflects it.** Ask: does the function list show `driver_test_0`
-without clicking away and back?
+**B3 [human] — the UI reflects it, with nothing driving it.** Ask: does the function list
+show `driver_test_0` without clicking away and back? This is now the *only* check on view
+updates — the plugin used to force a refresh after every call and no longer does, on the
+theory that undo-registered changes propagate on their own. A stale list here means that
+theory is wrong and the refresh has to come back.
 
 **B4 [human] — one undo step.** Ask the user to press ⌘Z once and say what happened.
 Expect all five B1 renames to revert together. Five presses to undo five renames means
@@ -122,8 +135,11 @@ succeed. A session that stays dead after this is a failure.
 
 ## D. Limits and failure modes
 
-**D1 — output is capped, not lost.** `print("x" * 500000)`. Expect truncated output with
-a note, not a hang and not a dropped response.
+**D1 — output is capped, and the cap is usable.** `print("x" * 500000)`. Expect truncated
+output with a note, no hang, no dropped response. Then answer the part that matters: did
+the truncated result appear **inline**, or did the client spill it to a file? The cap
+dropped from 100 KB to 32 KB precisely because 100 KB was being spilled and never read.
+If 32 KB still spills, say so — the number needs to come down again.
 
 **D2 — the timeout discards its work.** One `execute`:
 ```python
@@ -144,11 +160,32 @@ running" error rather than a hang or a second transaction.
 `AttributeError`-producing line in separate calls. Expect useful messages, no server
 crash, and the endpoint still responding afterwards.
 
+**D5 — removing a function makes it stay removed.** The guide was corrected to say
+`remove_user_function`, not `remove_function`, because the latter is an auto-level action
+that analysis undoes. Verify on a real function:
+
+```python
+f = bv.get_functions_containing(bv.entry_point)[0]
+addr, name = f.start, f.name
+bv.remove_user_function(f)
+print("gone?", bv.get_function_at(addr) is None)
+bv.update_analysis_and_wait()
+print("still gone after reanalysis?", bv.get_function_at(addr) is None)
+print(addr, name)
+```
+
+Expect `True` both times. A `False` on the second means the removal did not stick and the
+guide's advice is still wrong. Ask the user to ⌘Z afterwards, and confirm the function
+returns.
+
 ## E. Guidance quality
 
 **E1 — the guide's advice is followable.** Pick one workflow from `binja_guide` the
 driver has not used — defining a struct and applying it to a data variable is a good one
-— and follow it literally. Record any step where the documented call errored, returned a
+— and follow it literally. Along the way, use the idioms added after the last run and say
+whether each did what the guide claims: locating one instruction via
+`func.hlil.instructions` filtered on `il.address`, `bv.get_ascii_string_at(ptr, 1)`,
+`bv.sections.values()`, `bv.get_comment_at`, and `bv.get_data_refs`. Record any step where the documented call errored, returned a
 different shape than described, or needed an undocumented extra step.
 
 **E2 — what was missing.** Ask the driver: what did you have to discover by trial and
@@ -164,11 +201,41 @@ name a binary and mark a tab `(selected)`. A header that says no binary is open 
 listing one is a contradiction the model reads at the moment it is least sure of its
 target.
 
+## F. Interruption
+
+Binary Ninja has been pulling itself to the foreground during runs. Two suspects were
+removed — a forced view refresh after every call, and reverting an undo transaction for
+scripts that changed nothing — and this section is how we tell whether either was it.
+
+F1 and F2 need an **unmodified** file, and by this point `ls-a` and `ls-b` are heavily
+edited. Ask the user to open `scratch/driver/other` in a new tab, let it analyse, and
+`h.select("other")` before starting. Keep another application focused, run these one at a
+time, and record for each whether Binary Ninja came forward.
+
+**F1 — a read on a clean file.** `print(len(bv.functions))`. Expect no interruption; this
+path no longer touches the database at all.
+
+**F2 — a failure on a clean file.** `print(bv.no_such_attribute)`. Expect no interruption:
+nothing was recorded, so no undo state is settled. This is the case the last run pointed
+at.
+
+**F3 — a successful rename.** Rename one function. An interruption here is not the
+plugin driving it — nothing in this path touches the UI any more — but note it, because
+it would mean reanalysis is surfacing Binary Ninja's own progress.
+
+**F4 — a failure after the file is dirty.** With the rename from F3 unsaved,
+`print(bv.no_such_attribute)` again. This one *does* settle a transaction, because once
+the file is dirty the plugin cannot prove a script changed nothing. An interruption here
+is expected and tells us the mechanism is the undo settle rather than anything else.
+
+The pattern across the four is more informative than any single answer.
+
 ---
 
 ## Report format
 
-For each case: `PASS`, `FAIL`, or `SKIPPED (reason)`. For a failure, give the exact code
+Report F1–F4 as a four-line yes/no table; everything else as `PASS`, `FAIL`, or
+`SKIPPED (reason)`. For a failure, give the exact code
 sent, the exact response, and what was expected. Do not fix, retry differently, or work
 around a failure before recording it — the workaround is the finding.
 
