@@ -67,6 +67,31 @@ class TestTransactions:
         run("print(len(bv.functions))")
         assert bv.transactions == 1
 
+    def test_a_script_that_changed_nothing_does_not_disturb_the_database(self, run, bv):
+        """Committing or reverting makes the core redraw the view. Doing it
+        for a script that never touched anything is pure interruption, and a
+        typo on line one is the most common thing a driver sends."""
+        run("print(len(bv.functions))")
+        assert bv.committed == 0 and bv.reverted == 0
+
+    def test_a_failure_that_changed_nothing_does_not_revert(self, run, bv):
+        result = run("print(bv.no_such_attribute)")
+        assert not result.success
+        assert bv.reverted == 0
+
+    def test_a_failure_after_a_change_still_reverts(self, run, bv):
+        result = run("bv.rename('partial')\nraise ValueError('boom')")
+        assert not result.success
+        assert bv.reverted == 1
+        assert bv.renames == []
+
+    def test_a_dirty_file_is_always_settled(self, run, bv):
+        """Once the file is dirty we cannot prove a script changed nothing,
+        so correctness wins over the redraw."""
+        bv.file.modified = True
+        run("print(1)")
+        assert bv.committed == 1
+
 
 class TestTimeout:
     """A script that outruns the timeout cannot be killed, so the damage it can

@@ -57,6 +57,14 @@ class _Budget:
         )
 
 
+def _unmodified(bv: Any) -> bool:
+    """True only when the file is known-clean; False if unreadable."""
+    try:
+        return not bv.file.modified
+    except Exception:
+        return False
+
+
 class CodeExecutor:
     """Executes a script in one undo transaction and captures its output.
 
@@ -148,6 +156,23 @@ class CodeExecutor:
             on_scope(scope)
 
         state: dict[str, Any] = {"error": None, "abandoned": False}
+        clean_before = _unmodified(bv)
+
+        def settle(undo: Any, revert: bool) -> None:
+            """Close the undo state, skipping calls that provably do nothing.
+
+            Reverting or committing makes the core redraw the view, which is
+            disruptive if the script never touched the database — and most
+            failures are a typo or an AttributeError on the first line.
+            """
+            if clean_before and _unmodified(bv):
+                # The file was clean going in and is clean now, so this
+                # transaction is empty either way.
+                return
+            if revert:
+                bv.revert_undo_actions(undo)
+            else:
+                bv.commit_undo_actions(undo)
 
         def run() -> None:
             # The manual undo API rather than `with bv.undoable_transaction()`:
@@ -161,12 +186,9 @@ class CodeExecutor:
                 # reverts the batch just the same, so reporting success for it
                 # would be a lie.
                 state["error"] = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
-                bv.revert_undo_actions(undo)
+                settle(undo, revert=True)
             else:
-                if state["abandoned"]:
-                    bv.revert_undo_actions(undo)
-                else:
-                    bv.commit_undo_actions(undo)
+                settle(undo, revert=bool(state["abandoned"]))
             finally:
                 self._started_at = None
                 self._idle.set()
