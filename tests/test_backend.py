@@ -40,6 +40,22 @@ class TestExecute:
         assert other.renames == ["from_other"]
         assert bv.renames == []
 
+    def test_select_rebinds_bv_within_the_same_script(self, config, bv):
+        """Selecting and then editing in one script is the obvious thing to
+        write; if `bv` still pointed at the old binary the edit would land in
+        the wrong database and still report success."""
+        other = type(bv)("other")
+        tabs = [
+            BinaryTab(0, "target", "/bin/target", bv),
+            BinaryTab(1, "other", "/bin/other", other),
+        ]
+        backend = PluginBackend(config, tabs_provider=lambda: tabs)
+
+        result = backend.execute("h.select('other')\nbv.rename('landed')")
+        assert result.success
+        assert other.renames == ["landed"]
+        assert bv.renames == []
+
     def test_no_binary_open_is_a_clean_error(self, config):
         backend = PluginBackend(config, tabs_provider=list)
         result = backend.execute("print(1)")
@@ -55,6 +71,21 @@ class TestExecute:
         assert calls == [1]
         backend.execute("raise ValueError('x')")
         assert calls == [1]
+
+
+class TestModuleGlobal:
+    def test_bn_reaches_the_script(self, config, tabs):
+        """`bn` is one of three advertised globals; nothing else in the suite
+        passes bn_module, so dropping the wiring would go unnoticed."""
+        marker = type("FakeBN", (), {"core_version": staticmethod(lambda: "5.3.9757")})
+        backend = PluginBackend(config, tabs_provider=lambda: tabs, bn_module=marker)
+        result = backend.execute("print(bn.core_version())")
+        assert result.output.strip() == "5.3.9757"
+
+    def test_binja_version_reaches_the_guide_header(self, config, tabs):
+        marker = type("FakeBN", (), {"core_version": staticmethod(lambda: "5.3.9757")})
+        backend = PluginBackend(config, tabs_provider=lambda: tabs, bn_module=marker)
+        assert "5.3.9757" in backend.guide(None)
 
 
 class TestStatus:

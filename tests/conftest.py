@@ -6,9 +6,6 @@ supposed to hand the real BinaryView straight to `exec` rather than wrap it, and
 a growing fake would be the first sign that had stopped being true.
 """
 
-import contextlib
-from typing import Any
-
 import pytest
 
 from binja_codemode_mcp.plugin.session import BinaryTab
@@ -32,19 +29,23 @@ class FakeBinaryView:
         self.committed = 0
         self.reverted = 0
         self.renames: list[str] = []
+        self._snapshots: dict[str, list[str]] = {}
 
-    @contextlib.contextmanager
-    def undoable_transaction(self) -> Any:
-        """Mirrors the real contract: an exception reverts the whole batch."""
+    # Mirrors binaryview.py's manual undo API, which is what the executor uses
+    # so it can revert a batch that finished after its call already returned.
+    def begin_undo_actions(self, anonymous_allowed: bool = True) -> str:
         self.transactions += 1
-        before = list(self.renames)
-        try:
-            yield
-        except BaseException:
-            self.renames = before
-            self.reverted += 1
-            raise
+        state = f"state-{self.transactions}"
+        self._snapshots[state] = list(self.renames)
+        return state
+
+    def commit_undo_actions(self, state: str) -> None:
+        self._snapshots.pop(state, None)
         self.committed += 1
+
+    def revert_undo_actions(self, state: str) -> None:
+        self.renames = self._snapshots.pop(state, self.renames)
+        self.reverted += 1
 
     def rename(self, name: str) -> None:
         self.renames.append(name)

@@ -7,6 +7,8 @@ This module is only reachable in GUI mode — the package entry point guards on
 dependency behind a try/except that leaves every name possibly-unbound.
 """
 
+import contextlib
+
 from binaryninja import execute_on_main_thread
 from binaryninja.log import log_debug, log_error
 
@@ -141,14 +143,20 @@ def _ensure_indicator_in_status_bar():
 
 
 def _timer_tick():
-    """Timer callback for periodic UI updates."""
-    execute_on_main_thread(lambda: _do_timer_tick())
+    """QTimer already fires on the main thread, so no hop is needed.
 
-
-def _do_timer_tick():
-    """Perform timer tick on main thread."""
-    _ensure_indicator_in_status_bar()
-    _update_status_indicator()
+    Guarded because an exception here would otherwise print a traceback twice a
+    second forever: Qt can destroy the underlying C++ widget (closing a window)
+    while the Python wrapper survives, and touching it then raises.
+    """
+    global _status_button, _status_container
+    try:
+        _ensure_indicator_in_status_bar()
+        _update_status_indicator()
+    except RuntimeError:
+        # Wrapped C++ object went away; rebuild on the next tick.
+        _status_button = None
+        _status_container = None
 
 
 class MCPUINotification(UIContextNotification):
@@ -182,9 +190,16 @@ def init_status_indicator(plugin_instance):
     """
     global _indicator_timer, _ui_notification, _plugin_instance
 
+    # Reloading the module re-runs this. Tear the previous registration down
+    # first: rebinding the global would drop the last reference to a
+    # notification the C++ side still holds a pointer to, and the next tab
+    # switch would call into freed memory.
+    cleanup_status_indicator()
+
     _plugin_instance = plugin_instance
 
-    # Register UI notification
+    # Held in a module global for the lifetime of the session — the core keeps
+    # a raw pointer and will not keep this object alive.
     _ui_notification = MCPUINotification()
     UIContext.registerNotification(_ui_notification)
 
@@ -219,7 +234,8 @@ def cleanup_status_indicator():
         _indicator_timer = None
 
     if _ui_notification is not None:
-        UIContext.unregisterNotification(_ui_notification)
+        with contextlib.suppress(Exception):
+            UIContext.unregisterNotification(_ui_notification)
         _ui_notification = None
 
     _status_button = None

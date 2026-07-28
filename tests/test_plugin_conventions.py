@@ -2,6 +2,7 @@
 one of them fails at load time inside the GUI where no test can see it.
 """
 
+import ast
 import json
 from pathlib import Path
 
@@ -22,13 +23,26 @@ class TestImportOrder:
         a guard.
         """
         for path in PACKAGE.rglob("*.py"):
-            source = path.read_text()
-            if "PySide6" not in source:
+            # Parse: comparing raw substring positions would match the comment
+            # explaining this rule, which sits above the imports and makes the
+            # assertion pass no matter how the imports are ordered.
+            tree = ast.parse(path.read_text())
+            order = [
+                node.module.split(".")[0]
+                for node in ast.walk(tree)
+                if isinstance(node, ast.ImportFrom) and node.module
+            ] + [
+                alias.name.split(".")[0]
+                for node in ast.walk(tree)
+                if isinstance(node, ast.Import)
+                for alias in node.names
+            ]
+            if "PySide6" not in order:
                 continue
-            assert "binaryninjaui" in source, (
+            assert "binaryninjaui" in order, (
                 f"{path.name} imports PySide6 without binaryninjaui"
             )
-            assert source.index("binaryninjaui") < source.index("PySide6"), (
+            assert order.index("binaryninjaui") < order.index("PySide6"), (
                 f"{path.name} must import binaryninjaui before PySide6"
             )
 

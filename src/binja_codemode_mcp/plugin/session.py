@@ -14,6 +14,24 @@ from dataclasses import dataclass
 from typing import Any
 
 
+def _same_view(a: Any, b: Any) -> bool:
+    """Compare BinaryViews by value, never by `is`.
+
+    Binary Ninja hands back a fresh Python wrapper around the same core handle
+    on each call, which is why BinaryView defines __eq__ as a comparison of
+    ctypes.addressof(self.handle.contents). Identity would make a pinned view
+    look closed on the very next request.
+    """
+    if a is None or b is None:
+        return False
+    if a is b:
+        return True
+    try:
+        return bool(a == b)
+    except Exception:
+        return False
+
+
 @dataclass(frozen=True)
 class BinaryTab:
     index: int
@@ -45,7 +63,7 @@ class BinarySession:
 
         if self._pinned is not None:
             for tab in tabs:
-                if tab.bv is self._pinned:
+                if _same_view(tab.bv, self._pinned):
                     return tab
             # Pinned view was closed. Surface that rather than silently
             # retargeting a different binary.
@@ -91,7 +109,7 @@ class BinarySession:
                 "index": tab.index,
                 "name": tab.name,
                 "path": tab.path,
-                "selected": tab.bv is self._pinned,
+                "selected": _same_view(tab.bv, self._pinned),
             }
             for tab in self.tabs()
         ]

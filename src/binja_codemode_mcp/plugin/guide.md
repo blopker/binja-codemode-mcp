@@ -16,6 +16,11 @@ it made is reverted — a failed batch leaves no partial state. On success the w
 becomes a single undo step. You do not need checkpoints, and you should not build your own
 rollback.
 
+**There is a 30-second limit.** A script that exceeds it cannot be interrupted, so it is
+abandoned and its changes are reverted when it eventually finishes. Until then no other
+script can run. Keep batches small enough to finish, and prefer several focused calls over
+one sweeping one.
+
 **Each `execute` call is independent.** Nothing carries over: no variables, no imports, no
 open handles. Re-derive what you need, or keep intermediate results in your own notes.
 
@@ -40,8 +45,9 @@ Everything on `bv` works: `bv.functions`, `bv.get_code_refs()`, `bv.read()`,
 `h` is small:
 
 - `h.binaries()` — list open tabs.
-- `h.select(index_or_name)` — pick which one to work on. The session stays on your choice
-  even if the user switches tabs in the UI.
+- `h.select(index_or_name)` — pick which one to work on. It rebinds `bv` immediately, so
+  you can select and then edit in the same script. The session stays on your choice even
+  if the user switches tabs in the UI.
 
 **Do not iterate every function and decompile it.** On a few thousand functions that is
 minutes of analysis and far more output than fits. Filter to a handful first, then look
@@ -68,7 +74,9 @@ var = bv.get_data_var_at(addr)
 print(sym.name if sym else None)
 print(str(var.type) if var else None)
 
-for ref in bv.get_code_refs(addr):
+# Pass the length: without it only references to that exact byte are found,
+# and consumers of a table almost always index into its interior.
+for ref in bv.get_code_refs(addr, 16):
     print(hex(ref.address), ref.function.name if ref.function else None)
 ```
 
@@ -117,7 +125,7 @@ struct_type, _ = bv.parse_type_string(
 bv.define_user_type("record_t", struct_type)
 
 defined = bv.get_type_by_name("record_t")
-print(defined.width)
+print(defined.width if defined else "NOT DEFINED")
 ```
 
 **Always verify the width.** A correct field list with wrong packing or alignment still
@@ -159,24 +167,40 @@ object as the `name` argument fails — pass a string.
 Verify immediately:
 
 ```python
-print(bv.get_symbol_at(0x3AA08).name)
-print(str(bv.get_data_var_at(0x3AA08).type))
+sym = bv.get_symbol_at(0x3AA08)
+var = bv.get_data_var_at(0x3AA08)
+print(sym.name if sym else "NO SYMBOL")
+print(str(var.type) if var else "NO DATA VAR")
 ```
+
+Guard these lookups. They all return `None` on failure, and an `AttributeError` here
+propagates out of the transaction and reverts the very definition you were checking.
 
 ### Replacing conflicting analysis
 
 Binary Ninja may have already inferred a pointer, string, or smaller variable inside the
 range you want to cover. Remove the conflicting definitions first:
 
+Auto-discovered objects and ones you created need different calls, and the user-level
+variants silently do nothing to auto-discovered ones — which are usually exactly what is
+in the way. Check `sym.auto` and undefine accordingly:
+
 ```python
 for addr in (0x3AA08, 0x3AA20, 0x3AA38):
-    try:
-        bv.undefine_user_data_var(addr)
-    except Exception:
-        pass
+    var = bv.get_data_var_at(addr)
+    if var and var.address == addr:
+        if var.auto_discovered:
+            # blacklist stops analysis recreating it on the next pass
+            bv.undefine_data_var(addr, blacklist=True)
+        else:
+            bv.undefine_user_data_var(addr)
+
     sym = bv.get_symbol_at(addr)
     if sym:
-        bv.undefine_user_symbol(sym)
+        if sym.auto:
+            bv.undefine_auto_symbol(sym)
+        else:
+            bv.undefine_user_symbol(sym)
 ```
 
 Be precise about addresses. `get_data_var_at` queried at an interior address reports the
@@ -197,12 +221,14 @@ addr = 0x123456
 signature = (
     "uint32_t parse_record(const uint8_t *data, uint16_t length, record_t *out);"
 )
-parsed, _ = bv.parse_type_string(signature)
 func = bv.get_function_at(addr)
-func.type = parsed
+# Assign the signature STRING, not a parsed Type: the setter only applies the
+# name when it is given a string. Passing a parsed Type sets the prototype and
+# silently leaves the function called sub_123456.
+func.type = signature
 bv.update_analysis_and_wait()
 
-print(func.type)
+print(func.name, func.type)
 print(str(func.hlil)[:2000])
 ```
 
@@ -224,11 +250,12 @@ print(len(false_functions), [hex(f.start) for f in false_functions[:20]])
 ```
 
 Then remove them, define the real data objects so the intended interpretation is explicit,
-and rescan:
+and rescan. Use `remove_user_function`, not `remove_function`: the latter is an auto-level
+action, so the next analysis pass recreates every function you deleted.
 
 ```python
 for func in false_functions:
-    bv.remove_function(func)
+    bv.remove_user_function(func)
 
 remaining = [hex(f.start) for f in bv.functions if lo <= f.start < hi]
 print("remaining", len(remaining), remaining)

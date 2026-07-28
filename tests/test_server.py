@@ -5,13 +5,18 @@ a mocked handler would hide.
 """
 
 import json
+import socket
 import time
 import urllib.error
 import urllib.request
 
 import pytest
 
-from binja_codemode_mcp.plugin.server import MCPHTTPServer, origin_allowed
+from binja_codemode_mcp.plugin.server import (
+    MAX_BODY_BYTES,
+    MCPHTTPServer,
+    origin_allowed,
+)
 
 API_KEY = "test-key"
 
@@ -68,7 +73,13 @@ class TestOriginCheck:
         assert origin_allowed(origin)
 
     @pytest.mark.parametrize(
-        "origin", ["https://evil.example", "http://127.0.0.1.evil.example"]
+        "origin",
+        [
+            "https://evil.example",
+            "http://127.0.0.1.evil.example",
+            "http://localhost@evil.example",
+            "http://[::1",  # malformed literal: urlparse raises
+        ],
     )
     def test_remote_origins_rejected(self, origin):
         assert not origin_allowed(origin)
@@ -110,6 +121,93 @@ class TestRequests:
     def test_wrong_path_is_404(self, endpoint):
         status, _ = post(endpoint.replace("/mcp", "/execute"), {"id": 1})
         assert status == 404
+
+
+class TestKeepAlive:
+    """urllib opens a fresh connection per call, so these need a raw socket:
+    a rejection that leaves the body unread desyncs a pooled client."""
+
+    @staticmethod
+    def _sock(url: str) -> socket.socket:
+        host, port = url.split("//")[1].split("/")[0].split(":")
+        sk = socket.create_connection((host, int(port)), timeout=5)
+        sk.settimeout(5)
+        return sk
+
+    @staticmethod
+    def _read_response(sk: socket.socket) -> bytes:
+        """Read exactly one HTTP response: headers, then Content-Length bytes."""
+        buf = b""
+        while b"\r\n\r\n" not in buf:
+            chunk = sk.recv(4096)
+            if not chunk:
+                return buf
+            buf += chunk
+        head, _, rest = buf.partition(b"\r\n\r\n")
+        length = 0
+        for line in head.split(b"\r\n"):
+            if line.lower().startswith(b"content-length:"):
+                length = int(line.split(b":")[1])
+        while len(rest) < length:
+            chunk = sk.recv(4096)
+            if not chunk:
+                break
+            rest += chunk
+        return head + b"\r\n\r\n" + rest
+
+    @staticmethod
+    def _request(path: str, body: bytes, key: str | None = API_KEY) -> bytes:
+        auth = f"Authorization: Bearer {key}\r\n" if key else ""
+        return (
+            f"POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n{auth}"
+            f"Content-Type: application/json\r\nContent-Length: {len(body)}\r\n\r\n"
+        ).encode() + body
+
+    def test_connection_is_reusable_after_a_401(self, endpoint):
+        """A stale token must not poison the next request on the same socket."""
+        good = json.dumps({"jsonrpc": "2.0", "id": 5, "method": "ping"}).encode()
+        with self._sock(endpoint) as sk:
+            sk.sendall(self._request("/mcp", good, key="wrong"))
+            first = self._read_response(sk)
+            assert b"401" in first.split(b"\r\n")[0]
+
+            sk.sendall(self._request("/mcp", good))
+            second = self._read_response(sk)
+        assert b"200" in second.split(b"\r\n")[0], second[:120]
+        assert b'"id": 5' in second or b'"id":5' in second
+
+    def test_an_oversized_body_cannot_smuggle_a_pipelined_request(self, endpoint):
+        body = b"x" * (MAX_BODY_BYTES + 10)
+        with self._sock(endpoint) as sk:
+            sk.sendall(self._request("/mcp", body))
+            sk.sendall(b"GET /pwn HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+            seen = b""
+            try:
+                while chunk := sk.recv(4096):
+                    seen += chunk
+            except (TimeoutError, OSError):
+                pass
+        assert b"413" in seen
+        assert b"405" not in seen, "the smuggled GET was answered"
+
+    def test_negative_content_length_is_rejected_not_hung(self, endpoint):
+        """rfile.read(-1) reads to EOF and would hang the worker forever."""
+        with self._sock(endpoint) as sk:
+            sk.sendall(
+                b"POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                b"Authorization: Bearer " + API_KEY.encode() + b"\r\n"
+                b"Content-Length: -1\r\n\r\n"
+            )
+            assert b"400" in self._read_response(sk).split(b"\r\n")[0]
+
+    def test_chunked_body_is_refused_rather_than_silently_empty(self, endpoint):
+        with self._sock(endpoint) as sk:
+            sk.sendall(
+                b"POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                b"Authorization: Bearer " + API_KEY.encode() + b"\r\n"
+                b"Transfer-Encoding: chunked\r\n\r\n0\r\n\r\n"
+            )
+            assert b"411" in self._read_response(sk).split(b"\r\n")[0]
 
 
 class TestLifecycle:

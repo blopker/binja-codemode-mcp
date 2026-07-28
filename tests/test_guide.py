@@ -101,7 +101,38 @@ class TestGuideContent:
         assert "update_analysis_and_wait" in text
 
     def test_tells_the_model_to_print_hex(self):
-        assert "hex" in GUIDE_PATH.read_text().lower()
+        assert "Print addresses as hex" in GUIDE_PATH.read_text()
+
+    def test_uses_the_user_level_mutation_apis(self):
+        """The auto-level variants are the wrong tool and quietly undo
+        themselves: analysis recreates whatever they removed."""
+        text = GUIDE_PATH.read_text()
+        assert "remove_user_function" in text
+        assert "bv.remove_function(" not in text
+        assert "undefine_auto_symbol" in text
+        assert "blacklist=True" in text
+
+    def test_names_a_function_by_assigning_the_signature_string(self):
+        """func.type only applies the name when given a string; handing it a
+        parsed Type sets the prototype and leaves sub_xxxx in place."""
+        text = GUIDE_PATH.read_text()
+        assert "func.type = signature" in text
+        assert "func.type = parsed" not in text
+
+    def test_passes_a_length_to_get_code_refs(self):
+        """Without one, only refs to that exact byte are found."""
+        import re
+
+        text = GUIDE_PATH.read_text()
+        assert not re.search(r"get_code_refs\(\w+\)", text)
+
+    def test_states_the_timeout_and_that_it_discards_the_batch(self):
+        text = GUIDE_PATH.read_text()
+        assert "30-second limit" in text
+        assert "reverted when it eventually finishes" in text
+
+    def test_says_select_rebinds_bv_immediately(self):
+        assert "rebinds `bv` immediately" in GUIDE_PATH.read_text()
 
     def test_carries_no_project_specific_leftovers(self):
         """Guidance must generalise: no target-specific names, no dead API."""

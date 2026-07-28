@@ -18,11 +18,12 @@ from binaryninja import execute_on_main_thread_and_wait
 # see its members. Only imported from GUI-only call paths.
 from binaryninjaui import UIContext  # type: ignore
 
-from .session import BinaryTab
+from .session import BinaryTab, _same_view
 
 
 def _tab_name(ctx: Any, tab: Any, bv: Any) -> str:
-    for getter in ("getTabName", "getNameForTab"):
+    # UIContext exposes getNameForTab(); getTabName() lives on ViewFrame.
+    for getter in ("getNameForTab", "getTabName"):
         try:
             name = getattr(ctx, getter)(tab)
             if name:
@@ -53,7 +54,7 @@ def _collect() -> list[BinaryTab]:
                 bv = frame.getCurrentBinaryView() if frame else None
             except Exception:
                 bv = None
-            if bv is None or any(bv is s for s in seen):
+            if bv is None or any(_same_view(bv, s) for s in seen):
                 continue
             seen.append(bv)
             path = ""
@@ -77,7 +78,7 @@ def _collect() -> list[BinaryTab]:
                 bv = frame.getCurrentBinaryView() if frame else None
             except Exception:
                 bv = None
-            if bv is not None and not any(bv is s for s in seen):
+            if bv is not None and not any(_same_view(bv, s) for s in seen):
                 seen.append(bv)
                 path = getattr(getattr(bv, "file", None), "filename", "") or ""
                 tabs.append(

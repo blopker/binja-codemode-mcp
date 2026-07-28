@@ -97,17 +97,20 @@ class BinjaCodeModeMCP:
             log_info(f"  {marker} [{tab['index']}] {tab['name']}")
 
     def register_commands(self) -> None:
-        PluginCommand.register(
+        # register_global, not register: the BinaryView-scoped variant hides
+        # these commands until a file is open, and the server is meant to be
+        # startable with none.
+        PluginCommand.register_global(
             "Code Mode MCP\\Start Server",
             "Start the Code Mode MCP server",
             self.start_server,
         )
-        PluginCommand.register(
+        PluginCommand.register_global(
             "Code Mode MCP\\Stop Server",
             "Stop the Code Mode MCP server",
             self.stop_server,
         )
-        PluginCommand.register(
+        PluginCommand.register_global(
             "Code Mode MCP\\Show Status",
             "Show endpoint, API key, and open binaries",
             self.show_status,

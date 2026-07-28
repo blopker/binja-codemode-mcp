@@ -6,6 +6,7 @@ streams, and the MCP spec allows a plain JSON response to a POST.
 Pure module: stdlib only, the handler is injected.
 """
 
+import hmac
 import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -28,7 +29,10 @@ def origin_allowed(origin: str | None) -> bool:
     """
     if not origin:
         return True  # non-browser client
-    host = urlparse(origin).hostname
+    try:
+        host = urlparse(origin).hostname
+    except ValueError:
+        return False  # malformed Origin, e.g. a bad IPv6 literal
     return host in ("127.0.0.1", "::1", "localhost")
 
 
@@ -43,34 +47,54 @@ class _Handler(BaseHTTPRequestHandler):
         pass  # Binary Ninja's log is the place for this, not stderr
 
     def do_POST(self) -> None:
+        # Every rejection below has to consume the request body first. On a
+        # keep-alive connection an undrained body is read as the start of the
+        # next request, so the client's following call gets a nonsense reply —
+        # and a body could smuggle a whole pipelined request past the check
+        # that just rejected it.
         if urlparse(self.path).path != "/mcp":
-            self._send(404, {"error": "Not found. The MCP endpoint is /mcp."})
+            self._reject(404, {"error": "Not found. The MCP endpoint is /mcp."})
             return
         if not origin_allowed(self.headers.get("Origin")):
-            self._send(403, {"error": "Cross-origin requests are not allowed."})
+            self._reject(403, {"error": "Cross-origin requests are not allowed."})
             return
         if not self._authorized():
-            self._send(401, {"error": "Unauthorized."})
+            self._reject(401, {"error": "Unauthorized."})
             return
 
+        # No chunked support: the body length has to be known up front for the
+        # cap to mean anything, and treating a chunked body as empty would turn
+        # a real request into a silent no-op.
+        if "chunked" in (self.headers.get("Transfer-Encoding") or "").lower():
+            self._reject(411, {"error": "Chunked encoding is not supported."})
+            return
+
+        raw_length = self.headers.get("Content-Length")
         try:
-            length = int(self.headers.get("Content-Length") or 0)
+            length = int(raw_length) if raw_length is not None else 0
         except ValueError:
-            self._send(400, {"error": "Bad Content-Length."})
+            self._reject(400, {"error": "Bad Content-Length."})
+            return
+        # A negative length would make rfile.read() read to EOF and hang the
+        # thread until the client disconnects.
+        if length < 0:
+            self._reject(400, {"error": "Bad Content-Length."})
             return
         if length > MAX_BODY_BYTES:
-            self._send(413, {"error": "Request too large."})
+            self._reject(413, {"error": "Request too large."})
             return
 
+        body = self.rfile.read(length)
         try:
-            message = json.loads(self.rfile.read(length) or b"{}")
+            message = json.loads(body or b"{}")
         except (json.JSONDecodeError, UnicodeDecodeError):
             self._send(400, _parse_error())
             return
 
         if not isinstance(message, dict):
-            # Batching was removed from the spec in 2025-06-18.
-            self._send(400, _parse_error("Expected a single JSON-RPC object."))
+            # Batching was removed from the spec in 2025-06-18. The JSON parsed
+            # fine, so this is an invalid request rather than a parse error.
+            self._send(400, _invalid_request("Expected a single JSON-RPC object."))
             return
 
         response = self.mcp.handle(message)
@@ -87,9 +111,29 @@ class _Handler(BaseHTTPRequestHandler):
         # Stateless: no session to terminate.
         self._send_status(405, allow="POST")
 
+    def _reject(self, status: int, payload: dict[str, Any]) -> None:
+        """Reply to a request we are refusing, draining its body first."""
+        self._drain()
+        self._send(status, payload)
+
+    def _drain(self) -> None:
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = 0
+        remaining = min(max(length, 0), MAX_BODY_BYTES)
+        while remaining:
+            chunk = self.rfile.read(min(remaining, 65536))
+            if not chunk:
+                break
+            remaining -= len(chunk)
+        if length > MAX_BODY_BYTES:
+            # Too big to drain safely; the connection cannot be reused.
+            self.close_connection = True
+
     def _authorized(self) -> bool:
         header = self.headers.get("Authorization", "")
-        return header == f"Bearer {self.api_key}"
+        return hmac.compare_digest(header, f"Bearer {self.api_key}")
 
     def _send(self, status: int, payload: dict[str, Any]) -> None:
         body = json.dumps(payload).encode("utf-8")
@@ -109,6 +153,10 @@ class _Handler(BaseHTTPRequestHandler):
 
 def _parse_error(message: str = "Parse error") -> dict[str, Any]:
     return {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": message}}
+
+
+def _invalid_request(message: str) -> dict[str, Any]:
+    return {"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": message}}
 
 
 class MCPHTTPServer:

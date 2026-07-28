@@ -18,14 +18,25 @@ class Helpers:
 
     def __init__(self, session: BinarySession) -> None:
         self._session = session
+        self._scope: dict[str, Any] | None = None
+
+    def bind_scope(self, scope: dict[str, Any]) -> None:
+        """Called by the executor before a script runs, so select() can rebind
+        `bv` for the remainder of that script."""
+        self._scope = scope
 
     def binaries(self) -> list[dict[str, Any]]:
         """Open binaries, as dicts with index, name, path and selected flag."""
         return self._session.describe()
 
     def select(self, key: int | str) -> dict[str, Any]:
-        """Choose which open binary to work on, by tab index or name."""
+        """Choose which open binary to work on, by tab index or name.
+
+        Takes effect immediately: `bv` is rebound for the rest of this script.
+        """
         tab = self._session.select(key)
+        if self._scope is not None:
+            self._scope["bv"] = tab.bv
         return {"index": tab.index, "name": tab.name, "path": tab.path}
 
     def __repr__(self) -> str:
@@ -63,6 +74,7 @@ class PluginBackend:
             bv=tab.bv if tab else None,
             bn=self._bn,
             helpers=self.helpers,
+            on_scope=self.helpers.bind_scope,
         )
 
         if result.success and self._on_mutation is not None:

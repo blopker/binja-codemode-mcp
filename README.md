@@ -99,11 +99,15 @@ does the opposite: models already know `BinaryView` from pretraining, so a small
 costs far more in failed calls and hallucination recovery than the curation saves. It also
 goes stale against the API it wraps. Exposing `bv` deletes that whole class of problem.
 
-**One transaction per call.** Mutations applied outside `bv.undoable_transaction()` do not
+**One transaction per call.** Mutations applied outside an undo transaction do not
 register as undo actions, which means Binary Ninja's modified-tracking may not fire and
 the edits can be lost on save. Wrapping the whole script also makes a tool call atomic and
 collapses a batch to one ⌘Z, which is what a checkpoint/rollback feature would otherwise
-try — and fail — to provide.
+try — and fail — to provide. The executor drives `begin_undo_actions` /
+`commit_undo_actions` by hand rather than using the `undoable_transaction` context
+manager, because a batch that outran the timeout has to revert on its way out and the
+context manager would commit it. Scripts are serialised for the same reason: two open undo
+states on one database interleave, so reverting one can rewind the other.
 
 **Stateless calls.** Nothing persists between `execute` calls: no variables, no imports.
 Re-deriving state is cheaper than reasoning about a namespace neither side can see.
@@ -154,10 +158,11 @@ import binja_codemode_mcp, importlib
 importlib.reload(binja_codemode_mcp)
 ```
 
-Then `[UP] [ENTER]` to re-run after each edit. Two caveats: `PluginCommand.register` calls
-run again on reload, so menu entries can duplicate until restart, and a running server
-keeps serving the modules it was started with — stop it, reload, start it again. When
-anything looks stale, restart Binary Ninja.
+Then `[UP] [ENTER]` to re-run after each edit. One caveat: a running server keeps serving
+the modules it was started with — stop it, reload, start it again. When anything looks
+stale, restart Binary Ninja. Re-registering a command of the same name replaces the
+existing one, and the status widget tears down its previous notification on reload, so
+neither duplicates.
 
 For step debugging, `pip install --user debugpy`, then call
 `connect_vscode_debugger(port=12345)` in the Binary Ninja console and attach with a path
@@ -194,9 +199,9 @@ guide's content.
 
 ### Known limitations
 
-- The execution timeout abandons its worker thread rather than killing it, so a
-  `while True:` leaks a thread — with its transaction still open — for the life of the
-  process.
+- The execution timeout cannot interrupt a running script. The batch is marked abandoned
+  so it reverts rather than commits when it eventually finishes, and no other script can
+  run until it does, but a `while True:` still leaks a thread for the life of the process.
 - `tools/list_changed` is advertised but never emitted: the tool surface does not actually
   change when tabs open and close, and the guide header is regenerated per call.
 - `uicontext.list_tabs()` depends on `binaryninjaui` methods that have no type stubs. If
