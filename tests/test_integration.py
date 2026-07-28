@@ -106,3 +106,20 @@ def test_status_resource_reflects_the_live_session(client):
     status = json.loads(response["result"]["contents"][0]["text"])
     assert status["binary"]["name"] == "target"
     assert status["tabs"][0]["selected"] is True
+
+
+def test_a_failing_script_with_an_enormous_message_stays_usable(client):
+    """The reported bug, end to end: an unbounded error field produced a
+    response limited only by RAM."""
+    from binja_codemode_mcp.plugin.mcp import MAX_RESULT_BYTES
+
+    client("initialize")
+    response = client(
+        "tools/call",
+        name="execute",
+        arguments={"code": "raise ValueError('x' * 500_000)"},
+    )
+    text = text_of(response)
+    assert response["result"]["isError"] is True
+    assert "ValueError" in text
+    assert len(text.encode()) <= MAX_RESULT_BYTES

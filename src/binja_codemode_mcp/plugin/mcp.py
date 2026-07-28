@@ -7,56 +7,58 @@ without Binary Ninja or a socket.
 import json
 from typing import Any, Protocol
 
+# Every text field that leaves this process converges here, which is the last
+# layer that knows what each string means: this one is print output and should
+# keep its head, that one a traceback and should keep its tail. server.py cannot
+# do this job — it sees a finished JSON-RPC dict, and clipping serialized JSON
+# produces bytes no client can parse.
+MAX_RESULT_BYTES = 40_000  # assembled text of one tool result
+MAX_ERROR_BYTES = 4_000  # the Error: section reserved inside it
+MAX_MESSAGE_BYTES = 2_000  # a JSON-RPC error message or tool-error string
+
 PROTOCOL_VERSION = "2025-06-18"
 SERVER_NAME = "binja-codemode-mcp"
 SERVER_VERSION = "0.2.0"
 
-# Loaded at session start and always in context. Orientation only; the depth
-# lives behind binja_guide. Truncated at 2 KB by some clients, so keep it short
-# and put what matters first — a test enforces the budget.
+# Loaded at session start and always in context — the most expensive text here
+# per byte. Orientation only: mechanics belong in EXECUTE_DESCRIPTION, which is
+# always surfaced alongside the tool they govern. This field has to stand alone,
+# because some clients drop it. Truncated at 2 KB by some; a test enforces that.
 INSTRUCTIONS = """\
 Drive a live Binary Ninja session by writing Python.
 
-You get the REAL Binary Ninja API, not a wrapper — use what you already know from
-api.binary.ninja. Globals inside `execute`: `bv` (the selected BinaryView), `bn` (the
-binaryninja module), `h` (this plugin's few helpers). Ordinary Python works: imports,
-comprehensions, nested functions.
+`execute` gives you the REAL Binary Ninja API, not a wrapper — use what you already
+know from api.binary.ninja. Globals: `bv` (the selected BinaryView), `bn` (the
+binaryninja module), `h` (this plugin's few helpers).
 
-Call `binja_guide` before your first non-trivial script. It reports the loaded binary,
-its architecture and analysis state, the Binary Ninja version to match docs against, the
-open tabs, and the API calls that behave surprisingly.
+Call `binja_guide` before your first non-trivial script: it reports the live session
+and the API calls that behave surprisingly.
 
-Each `execute` runs in one undo transaction: if the script raises, every change it made
-is reverted, so a failed batch leaves no partial state. Each call is independent — no
-variables persist between calls. `print()` is the return channel and is capped at
-32 KB, so filter before printing. Print addresses as hex.
-
-Only make database changes you are confident in; record ambiguity in a comment instead
-of guessing."""
+Only make database changes you are confident in; record ambiguity in a comment
+instead of guessing. Print addresses as hex."""
 
 EXECUTE_DESCRIPTION = """\
-Run Python against the selected binary in Binary Ninja. Use this for every query and
-every edit — reading bytes, decompiling, renaming, applying types, adding comments.
+Run Python against the selected binary in Binary Ninja: every query and every edit —
+reading bytes, decompiling, renaming, applying types, adding comments.
 
 Globals: `bv` (real BinaryView), `bn` (binaryninja module), `h` (helpers:
 `h.binaries()`, `h.select(index_or_name)`). Real builtins and imports work.
 
-Return values via `print()`; output is verbatim and capped at 32 KB. Print
-addresses as hex. Do NOT iterate every function and decompile — filter to a
-handful first, or you will blow the cap and the time limit.
+`print()` is the return channel: verbatim, capped at 32 KB; a traceback comes back
+trimmed to its last 4 KB. Print addresses as hex. Do NOT iterate every function and
+decompile — filter to a handful first, or you blow the cap and the 30s limit.
 
-The whole script runs in one undo transaction: an exception reverts every change
-it made. Call `bv.update_analysis_and_wait()` after changing a function type or
-signature, or subsequent reads see stale analysis.
+The whole script runs in one undo transaction: an exception reverts every change it
+made, and nothing persists to the next call. Call `bv.update_analysis_and_wait()`
+after changing a function type or signature, or later reads see stale analysis.
 
-Nothing persists between calls. Read `binja_guide` first if you have not yet."""
+Read `binja_guide` first if you have not yet."""
 
 GUIDE_DESCRIPTION = """\
-Read this before your first non-trivial script in a session. Returns the live session
-state — which binary is loaded, its architecture, analysis status, the Binary Ninja
-version, and the open tabs — followed by practical guidance on recovering data formats,
-defining types and data variables, applying function prototypes, and the Binary Ninja
-calls that behave surprisingly. Pass `topic` to read a single section."""
+Read this before your first non-trivial script. Returns the live session state —
+binary, architecture, analysis status, Binary Ninja version, open tabs — then
+guidance on recovering data formats, defining types and data variables, applying
+function prototypes, and the calls that behave surprisingly."""
 
 
 class Backend(Protocol):
@@ -177,31 +179,36 @@ class MCPHandler:
             if not isinstance(code, str) or not code.strip():
                 return _tool_error("`code` is required and must be a non-empty string.")
             result = self.backend.execute(code)
-            parts: list[str] = []
-            if result.output:
-                parts.append(result.output)
-            if result.error:
-                parts.append(f"\nError: {result.error}")
-            if not parts:
-                parts.append("(no output — the script printed nothing)")
-            # A footer, never mixed into the script's own output: batch sizing
-            # against the timeout is guesswork without a throughput signal.
-            budget = getattr(result, "timeout_s", None)
-            elapsed = getattr(result, "elapsed_s", 0.0) or 0.0
-            parts.append(
-                f"\n\n[{elapsed:.1f}s of {budget:.0f}s]"
-                if budget
-                else f"\n\n[{elapsed:.1f}s]"
+
+            # Reserve the footer and the error out of the budget first, then
+            # give the rest to output. The footer is concatenated after the
+            # clipping so no truncation can reach it.
+            footer = _footer(
+                getattr(result, "elapsed_s", 0.0) or 0.0,
+                getattr(result, "timeout_s", None),
             )
+            tail = ""
+            if result.error:
+                note = _ROLLBACK_NOTE if getattr(result, "reverted", False) else ""
+                room = MAX_ERROR_BYTES - _size(_ERROR_PREFIX) - _size(note)
+                tail = _ERROR_PREFIX + _clip_error(result.error, room) + note
+
+            allowance = MAX_RESULT_BYTES - _size(footer)
+            if tail:
+                allowance -= MAX_ERROR_BYTES
+            body = _clip_head(result.output, allowance) if result.output else ""
+            if not body and not tail:
+                body = "(no output — the script printed nothing)"
+
             return {
-                "content": [{"type": "text", "text": "".join(parts)}],
+                "content": [{"type": "text", "text": body + tail + footer}],
                 "isError": not result.success,
             }
 
         if name == "binja_guide":
             topic = args.get("topic")
             text = self.backend.guide(topic if isinstance(topic, str) else None)
-            return {"content": [{"type": "text", "text": text}], "isError": False}
+            return _tool_text(text, MAX_RESULT_BYTES, is_error=False)
 
         return _tool_error(f"Unknown tool: {name}")
 
@@ -231,17 +238,96 @@ class MCPHandler:
         raise MCPError(-32602, f"Unknown resource: {uri}")
 
 
+_HEAD_NOTE = "\n... (truncated here; the rest was dropped)"
+_TAIL_NOTE = "... (truncated; earlier lines were dropped)\n"
+_ERROR_PREFIX = "\nError: "
+_ROLLBACK_NOTE = "\n(Rolled back: any changes this script made are gone.)"
+
+
+def _size(text: str) -> int:
+    """Bytes, matching _Budget's encoding so both caps mean the same thing."""
+    return len(text.encode("utf-8", "replace"))
+
+
+def _clip_head(text: str, limit: int) -> str:
+    """Keep the beginning. For print() output, which is read top-down."""
+    if _size(text) <= limit:
+        return text
+    room = limit - _size(_HEAD_NOTE)
+    if room <= 0:
+        return _HEAD_NOTE[:limit] if limit > 0 else ""
+    return text.encode("utf-8", "replace")[:room].decode("utf-8", "ignore") + _HEAD_NOTE
+
+
+def _clip_tail(text: str, limit: int) -> str:
+    """Keep the end. For a traceback, whose last line is the exception itself."""
+    if _size(text) <= limit:
+        return text
+    room = limit - _size(_TAIL_NOTE)
+    if room <= 0:
+        # Guard the slice: bytes[-0:] is the WHOLE buffer, not an empty one, so
+        # a small limit would return more than it was given.
+        return _TAIL_NOTE[:limit] if limit > 0 else ""
+    kept = text.encode("utf-8", "replace")[-room:].decode("utf-8", "ignore")
+    return _TAIL_NOTE + kept
+
+
+def _clip_error(error: str, limit: int) -> str:
+    """Trim an error to its most useful parts: the first line and the last frames.
+
+    Tail-first, because the bottom of a traceback is the exception and the frame
+    that raised it. The first line is kept as well: the executor puts
+    `Type: message` there, so an exception whose own message is enormous still
+    reports what kind it was — which pure tail-clipping would lose.
+    """
+    if limit <= 0:
+        return ""
+    if _size(error) <= limit:
+        return error
+    first, _, rest = error.partition("\n")
+    head = _clip_head(first, max(limit // 4, 1))
+    out = head + "\n" + _clip_tail(rest, max(limit - _size(head) - 1, 0))
+    # Composing two bounded pieces can still overshoot by the joiner at tiny
+    # limits; clamp so the bound holds for every input.
+    return out if _size(out) <= limit else _clip_head(out, limit)
+
+
+def _footer(elapsed: float, budget: float | None) -> str:
+    """Throughput signal. Batch sizing against the timeout is otherwise guesswork."""
+    if budget:
+        return f"\n\n[{elapsed:.1f}s of {budget:.0f}s]"
+    return f"\n\n[{elapsed:.1f}s]"
+
+
+def _tool_text(text: str, limit: int, *, is_error: bool) -> dict[str, Any]:
+    return {
+        "content": [{"type": "text", "text": _clip_head(text, limit)}],
+        "isError": is_error,
+    }
+
+
 def _contents(uri: str, text: str, mime: str) -> dict[str, Any]:
+    """Bound a resource body.
+
+    JSON is replaced rather than clipped: trimming it mid-token produces
+    exactly the unparseable bytes server.py refuses to send. Prose is clipped.
+    """
+    if _size(text) > MAX_RESULT_BYTES:
+        text = (
+            json.dumps({"error": "Resource too large to return."})
+            if mime == "application/json"
+            else _clip_head(text, MAX_RESULT_BYTES)
+        )
     return {"contents": [{"uri": uri, "mimeType": mime, "text": text}]}
 
 
 def _tool_error(message: str) -> dict[str, Any]:
-    return {"content": [{"type": "text", "text": message}], "isError": True}
+    return _tool_text(message, MAX_MESSAGE_BYTES, is_error=True)
 
 
 def _error(msg_id: Any, code: int, message: str) -> dict[str, Any]:
     return {
         "jsonrpc": "2.0",
         "id": msg_id,
-        "error": {"code": code, "message": message},
+        "error": {"code": code, "message": _clip_head(message, MAX_MESSAGE_BYTES)},
     }

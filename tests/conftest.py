@@ -15,6 +15,8 @@ class _FileMetadata:
     def __init__(self, filename: str) -> None:
         self.filename = filename
         self.original_filename = filename
+        # Deliberately never flips: the real FileMetadata.modified does not
+        # track script mutations, which a live probe established the hard way.
         self.modified: bool = False
 
 
@@ -56,7 +58,6 @@ class FakeBinaryView:
 
     def rename(self, name: str) -> None:
         self.renames.append(name)
-        self.file.modified = True
 
 
 @pytest.fixture

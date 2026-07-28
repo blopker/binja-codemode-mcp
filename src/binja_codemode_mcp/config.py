@@ -51,9 +51,15 @@ class Config:
     port: int = 42069
     api_key: str = ""
 
-    # ~8k tokens. 100 KB fits in memory fine but overruns a client's
-    # per-result budget, which spills the response to a file where the model
-    # cannot see it inline — a cap that prevents a hang but not a lost answer.
+    # The print() cap, and the write-time memory guard that stops an abandoned
+    # timed-out script growing a buffer forever. Distinct from the response
+    # budget, which is MAX_RESULT_BYTES in plugin/mcp.py — they share a scale,
+    # not a purpose. Keep max_output_bytes + MAX_ERROR_BYTES < MAX_RESULT_BYTES
+    # or a result gets truncated twice, with two notices.
+    #
+    # ~8k tokens. 100 KB fits in memory fine but overruns a client's per-result
+    # budget, which spills the response to a file where the model cannot see it
+    # inline — a cap that prevents a hang but not a lost answer.
     max_output_bytes: int = 32_000
     execution_timeout_s: float = 30.0
 

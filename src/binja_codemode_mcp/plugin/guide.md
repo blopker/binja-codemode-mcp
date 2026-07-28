@@ -1,9 +1,7 @@
 # Working in Binary Ninja
 
-Techniques that hold up in practice. The Binary Ninja API itself is documented at
-api.binary.ninja — match the version in the header above. This file covers what that
-documentation does not: which calls behave surprisingly, and how to make changes that
-are actually correct.
+What api.binary.ninja does not tell you: which calls behave surprisingly, and how to
+make changes that are actually correct.
 
 ## Ground rules
 
@@ -11,52 +9,34 @@ are actually correct.
 because everything downstream inherits it and the next reader trusts it. If the evidence
 is ambiguous, record the ambiguity in a comment instead of guessing at a precise type.
 
-**Each `execute` call runs in one undo transaction.** If your script raises, every change
-it made is reverted — a failed batch leaves no partial state. On success the whole batch
-becomes a single undo step. You do not need checkpoints, and you should not build your own
-rollback.
+**There is a 30-second limit.** A script that exceeds it cannot be interrupted: it is
+abandoned, its changes are reverted when it eventually finishes, and nothing else can run
+until then. Prefer several focused calls to one sweeping one, sized from the
+`[1.4s of 30s]` footer on each result — your only signal about throughput on this binary.
 
-Each result ends with a `[1.4s of 30s]` footer, after your output. Use it to size the
-next batch: it is the only signal you get about throughput on this binary.
-
-**There is a 30-second limit.** A script that exceeds it cannot be interrupted, so it is
-abandoned and its changes are reverted when it eventually finishes. Until then no other
-script can run. Keep batches small enough to finish, and prefer several focused calls over
-one sweeping one.
+**Each call runs in one undo transaction.** If your script raises, every change it made is
+reverted, so you need no checkpoints and should not build your own rollback.
 
 **Do not touch the GUI.** Your script runs on a worker thread. Qt may only be used from
 Binary Ninja's main thread, so importing `binaryninjaui` or `PySide6` and calling into a
-widget — `findChildren`, `windowTitle`, anything on `UIContext` — will crash Binary Ninja
-outright, losing unsaved analysis. There is no sandbox to stop you. Everything you need is
-on `bv`; use `h` for the few session-level things, and leave the interface alone.
+widget — `findChildren`, `windowTitle`, anything on `UIContext` — crashes Binary Ninja
+outright, losing unsaved analysis. Nothing stops you. Everything you need is on `bv`.
 
-**Each `execute` call is independent.** Nothing carries over: no variables, no imports, no
-open handles. Re-derive what you need, or keep intermediate results in your own notes.
-
-**Print what you want back.** `print()` output is the return channel, verbatim. It is
-capped at 32 KB, so filter before printing rather than dumping and hoping.
-
-**Print addresses as hex.** The API returns ints and the disassembly shows hex; mixing the
-two is an easy way to lose your place. `print(hex(addr))`, always.
+**Nothing carries over between calls**: no variables, no imports, no open handles.
+`print()` is the return channel, verbatim and capped at 32 KB, so filter rather than dump;
+a failing script returns the tail of its traceback, trimmed to 4 KB.
+Print addresses as hex — the API returns ints while the disassembly shows hex, and
+mixing them loses your place.
 
 ## Environment
 
-Three globals:
-
-- `bv` — the selected `BinaryView`. The real thing, not a wrapper.
-- `bn` — the `binaryninja` module.
-- `h` — this plugin's helpers, for the few things not in the Binary Ninja API.
-
-Everything on `bv` works: `bv.functions`, `bv.get_code_refs()`, `bv.read()`,
-`bv.define_user_type()`, `func.hlil`, `block.outgoing_edges`. Ordinary Python works too —
-`import struct`, `import re`, comprehensions, nested functions, `collections`.
-
-`h` is small:
+`bv` is the selected `BinaryView` — the real thing, not a wrapper — and `bn` is the
+`binaryninja` module. Everything on `bv` works, and so does ordinary Python. Two helpers
+cover what the Binary Ninja API does not:
 
 - `h.binaries()` — list open tabs.
 - `h.select(index_or_name)` — pick which one to work on. It rebinds `bv` immediately, so
-  you can select and then edit in the same script. The session stays on your choice even
-  if the user switches tabs in the UI.
+  you can select and then edit in the same script.
 
 **You have the filesystem.** There is no sandbox: `open()`, `pathlib`, `struct`,
 `hashlib`, `subprocess` all work. Reading the file on disk alongside the analysis is often
@@ -87,9 +67,8 @@ for f in candidates[:5]:
 
 ## Working across two databases
 
-Two binaries open at once is the setup for porting annotations, diffing builds, or
-carrying a type library forward. `h.select()` rebinds `bv` immediately, which makes this
-the whole pattern: read into locals from one, select, write to the other.
+Porting annotations, diffing builds, or carrying a type library forward is one pattern:
+read into locals from one view, `h.select()` the other, write.
 
 ```python
 h.select(1)                                   # source
@@ -183,16 +162,6 @@ Three that reliably cost a round trip:
 - `Segment` has no `.flags`. What you want after a raw-file diff is `seg.data_offset` and
   `seg.data_length`, which map file offsets to virtual addresses.
 
-A compact hexdump:
-
-```python
-base, size = 0x3AA00, 0x50
-data = bytes(bv.read(base, size))
-for off in range(0, len(data), 8):
-    chunk = data[off : off + 8]
-    print(hex(base + off), " ".join(f"{b:02x}" for b in chunk), repr(chunk))
-```
-
 ## Strings, sections, and references
 
 Reading a C string at a pointer — the second argument is a *minimum* length, and the
@@ -203,12 +172,8 @@ s = bv.get_ascii_string_at(ptr, 1)
 print(s.value if s else None)
 ```
 
-`bv.sections` is a mapping, not a list, so enumerating needs `.values()`:
-
-```python
-for section in bv.sections.values():
-    print(section.name, hex(section.start), hex(section.end))
-```
+`bv.sections` is a mapping, not a list: iterate `bv.sections.values()` for `.name`,
+`.start`, `.end`.
 
 Follow **data** references as well as code ones. A pointer table is referenced by data
 refs, so looking only at `get_code_refs` can miss the consumer entirely:
@@ -369,16 +334,11 @@ print(func.name, func.type)
 print(str(func.hlil)[:2000])
 ```
 
-When you already hold a `Type` object — porting from another view, or reusing one you
-built — there is no signature string to assign, so do both explicitly:
+When you hold a `Type` object rather than a string there is no name in it to apply, so do
+both: `f.type = tobj` then `f.name = name`.
 
-```python
-f.type = tobj      # prototype, parameter names, calling convention
-f.name = name      # the type assignment does not set the name
-```
-
-`update_analysis_and_wait()` matters: querying a function immediately after changing its
-type otherwise shows stale analysis. Verify the prototype and the decompilation after
+Without `update_analysis_and_wait()` a query right after a type change shows stale
+analysis. Verify the prototype and the decompilation after
 every signature change.
 
 ## Diffing two builds

@@ -53,6 +53,17 @@ class TestTransactions:
         assert bv.committed == 1
         assert bv.renames == ["parse_header"]
 
+    def test_a_failure_reverts_even_when_the_file_looks_unmodified(self, run, bv):
+        """bv.file.modified stays False through a rename, so anything that
+        gates the revert on it silently stops reverting. Found live: a script
+        raised and its rename persisted."""
+        assert bv.file.modified is False
+        result = run("bv.rename('must_not_persist')\nraise ValueError('boom')")
+        assert not result.success
+        assert bv.renames == []
+        assert bv.reverted == 1
+        assert result.reverted is True
+
     def test_failing_script_reverts_every_change(self, run, bv):
         result = run("""
             bv.rename('first')
@@ -67,30 +78,11 @@ class TestTransactions:
         run("print(len(bv.functions))")
         assert bv.transactions == 1
 
-    def test_a_script_that_changed_nothing_does_not_disturb_the_database(self, run, bv):
-        """Committing or reverting makes the core redraw the view. Doing it
-        for a script that never touched anything is pure interruption, and a
-        typo on line one is the most common thing a driver sends."""
-        run("print(len(bv.functions))")
-        assert bv.committed == 0 and bv.reverted == 0
-
-    def test_a_failure_that_changed_nothing_does_not_revert(self, run, bv):
-        result = run("print(bv.no_such_attribute)")
-        assert not result.success
-        assert bv.reverted == 0
-
     def test_a_failure_after_a_change_still_reverts(self, run, bv):
         result = run("bv.rename('partial')\nraise ValueError('boom')")
         assert not result.success
         assert bv.reverted == 1
         assert bv.renames == []
-
-    def test_a_dirty_file_is_always_settled(self, run, bv):
-        """Once the file is dirty we cannot prove a script changed nothing,
-        so correctness wins over the redraw."""
-        bv.file.modified = True
-        run("print(1)")
-        assert bv.committed == 1
 
 
 class TestTimeout:
@@ -213,6 +205,25 @@ class TestErrors:
         assert not result.success
         assert "before" in result.output
         assert "ValueError: boom" in (result.error or "")
+
+    def test_the_error_field_keeps_the_whole_traceback(self, run, bv):
+        """Bounding happens at the transport boundary, not here — this field
+        never crosses a wire, and clipping it at production would scatter the
+        limit back across the codebase."""
+        result = run("raise ValueError('q' * 50_000)")
+        assert result.error is not None
+        assert len(result.error) > 50_000
+
+    def test_a_reverted_failure_reports_that_it_reverted(self, run, bv):
+        result = run("bv.rename('gone')\nraise ValueError('boom')")
+        assert result.reverted is True
+
+    def test_every_failure_reports_a_rollback(self, run, bv):
+        """There is no reliable way to tell whether a script recorded
+        anything, so the transaction is always rolled back and always said
+        to be. Vacuous when the script changed nothing; never wrong."""
+        assert run("raise ValueError('boom')").reverted is True
+        assert run("bv.rename('x')\nraise ValueError('boom')").reverted is True
 
     def test_syntax_error_is_reported_without_running_anything(self, run, bv):
         result = run("def broken(")

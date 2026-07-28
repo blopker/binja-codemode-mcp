@@ -83,10 +83,15 @@ Expect both to print. They need not match — the view is mapped, the file is no
 **B1 — a successful batch lands.** Rename five `sub_*` functions to `driver_test_0..4`.
 Read them back in a *second* `execute`. Expect the new names.
 
-**B2 — a failing batch leaves nothing behind.** In one `execute`, rename three more
-functions and then `raise ValueError("boom")`. Expect the tool to report the error.
-Then, in a second `execute`, read those three addresses back: expect their **original**
-names. Any renamed one is a partial-state failure and the most serious possible result.
+**B2 — a failing batch leaves nothing behind.** *The single most important case here.*
+In one `execute`, rename three more functions and then `raise ValueError("boom")`. Expect
+the tool to report the error. Then, in a second `execute`, read those three addresses
+back: expect their **original** names.
+
+This silently regressed once: an optimisation gated the revert on `bv.file.modified`,
+which does not move when a script mutates, so failed scripts kept their changes. It was
+found by hand, not by the suite. Any renamed function here is a partial-state failure and
+the most serious possible result.
 
 **B3 [human] — the UI reflects it, with nothing driving it.** Ask: does the function list
 show `driver_test_0` without clicking away and back? This is now the *only* check on view
@@ -178,11 +183,24 @@ Expect `True` both times. A `False` on the second means the removal did not stic
 guide's advice is still wrong. Ask the user to ⌘Z afterwards, and confirm the function
 returns.
 
+**D6 — a failing script returns a readable error.** `raise ValueError("x" * 500_000)`.
+Expect a bounded result that names `ValueError`, arrives **inline** rather than spilled to
+a file, and ends with the timing footer. Section D covered the output cap but never a
+large error, which is the gap that let an unbounded traceback ship.
+
+**D7 — a rollback is stated.** Rename a function and then raise in the same script.
+Expect the error to carry a rollback note, and a second call to confirm the original
+name. Every failure reverts and every failure says so, including one that changed
+nothing — there is no reliable way to tell, so the note is vacuous rather than absent.
+
+
 ## E. Guidance quality
 
 **E1 — the guide's advice is followable.** Pick one workflow from `binja_guide` the
-driver has not used — defining a struct and applying it to a data variable is a good one
-— and follow it literally. Along the way, use the idioms added after the last run and say
+driver has not used and follow it literally. Four sections are new since the last run and
+none has been exercised: *Working across two databases*, *User annotations vs
+auto-analysis*, *Diffing two builds*, and *Strings, sections, and references*. The
+cross-database port is the most valuable to try, and needs both `ls-a` and `ls-b` open. Along the way, use the idioms added after the last run and say
 whether each did what the guide claims: locating one instruction via
 `func.hlil.instructions` filtered on `il.address`, `bv.get_ascii_string_at(ptr, 1)`,
 `bv.sections.values()`, `bv.get_comment_at`, and `bv.get_data_refs`. Record any step where the documented call errored, returned a
@@ -201,34 +219,28 @@ name a binary and mark a tab `(selected)`. A header that says no binary is open 
 listing one is a contradiction the model reads at the moment it is least sure of its
 target.
 
-## F. Interruption
+## F. Interruption (known behaviour — confirm, do not investigate)
 
-Binary Ninja has been pulling itself to the foreground during runs. Two suspects were
-removed — a forced view refresh after every call, and reverting an undo transaction for
-scripts that changed nothing — and this section is how we tell whether either was it.
+A failed script pulls Binary Ninja to the foreground. This is understood and accepted:
+every failure reverts its undo transaction, and `revert_undo_actions` raises the window
+even when the transaction recorded nothing. Isolated against a live instance — an empty
+*commit* is silent, an empty *revert* pops. Skipping the revert is what caused the B2
+regression, so it stays.
 
-F1 and F2 need an **unmodified** file, and by this point `ls-a` and `ls-b` are heavily
-edited. Ask the user to open `scratch/driver/other` in a new tab, let it analyse, and
-`h.select("other")` before starting. Keep another application focused, run these one at a
-time, and record for each whether Binary Ninja came forward.
+Keep another application focused and confirm the pattern still matches. Report F1–F3 as
+a three-line yes/no table.
 
-**F1 — a read on a clean file.** `print(len(bv.functions))`. Expect no interruption; this
-path no longer touches the database at all.
+**F1 — a read on a clean file.** `print(len(bv.functions))`. Expect **no** pop: nothing
+is reverted.
 
-**F2 — a failure on a clean file.** `print(bv.no_such_attribute)`. Expect no interruption:
-nothing was recorded, so no undo state is settled. This is the case the last run pointed
-at.
+**F2 — a failure that changed nothing.** `print(bv.no_such_attribute)`. Expect a pop.
+Annoying, documented, not a bug.
 
-**F3 — a successful rename.** Rename one function. An interruption here is not the
-plugin driving it — nothing in this path touches the UI any more — but note it, because
-it would mean reanalysis is surfacing Binary Ninja's own progress.
+**F3 — a successful rename.** Expect at most one pop, from the commit and redraw.
 
-**F4 — a failure after the file is dirty.** With the rename from F3 unsaved,
-`print(bv.no_such_attribute)` again. This one *does* settle a transaction, because once
-the file is dirty the plugin cannot prove a script changed nothing. An interruption here
-is expected and tells us the mechanism is the undo settle rather than anything else.
+Anything that pops *outside* this pattern — a `binja_guide` call, a read that settles
+nothing — is new and worth reporting.
 
-The pattern across the four is more informative than any single answer.
 
 ---
 

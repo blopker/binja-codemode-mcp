@@ -91,22 +91,54 @@ class TestRender:
         assert "'Types'" in out
 
 
+class TestGuideSize:
+    """The guide is returned as a single tool result, so it has to fit in one
+    — with room for the generated header. It has grown steadily."""
+
+    def test_the_rendered_guide_fits_in_one_tool_result(self):
+        from binja_codemode_mcp.plugin.mcp import MAX_RESULT_BYTES
+
+        rendered = render(FULL_STATUS)
+        assert len(rendered.encode()) < MAX_RESULT_BYTES, (
+            "guide.md has outgrown the response budget; split it into topics "
+            "or raise MAX_RESULT_BYTES deliberately"
+        )
+
+    def test_an_absurd_topic_is_not_echoed_whole(self):
+        out = render(FULL_STATUS, topic="z" * 10_000)
+        assert len(out.encode()) < 5_000
+
+
+def guide_text() -> str:
+    """Guide text with whitespace flattened.
+
+    These tests pin that a rule is present, not how it happens to wrap — a
+    reflow should not fail them, and deleting the rule should.
+    """
+    return " ".join(GUIDE_PATH.read_text().split())
+
+
 class TestGuideContent:
     """The guide is the product. Guard the rules that earn their place in it."""
 
     def test_documents_the_gotchas_that_cost_real_time(self):
-        text = GUIDE_PATH.read_text()
+        text = guide_text()
         assert "BasicTypeParserResult" in text
         assert "QualifiedName" in text
         assert "update_analysis_and_wait" in text
 
+    def test_states_the_error_trim_alongside_the_output_cap(self):
+        text = guide_text()
+        assert "32 KB" in text
+        assert "4 KB" in text
+
     def test_tells_the_model_to_print_hex(self):
-        assert "Print addresses as hex" in GUIDE_PATH.read_text()
+        assert "Print addresses as hex" in guide_text()
 
     def test_uses_the_user_level_mutation_apis(self):
         """The auto-level variants are the wrong tool and quietly undo
         themselves: analysis recreates whatever they removed."""
-        text = GUIDE_PATH.read_text()
+        text = guide_text()
         assert "remove_user_function" in text
         assert "bv.remove_function(" not in text
         assert "undefine_auto_symbol" in text
@@ -115,7 +147,7 @@ class TestGuideContent:
     def test_names_a_function_by_assigning_the_signature_string(self):
         """func.type only applies the name when given a string; handing it a
         parsed Type sets the prototype and leaves sub_xxxx in place."""
-        text = GUIDE_PATH.read_text()
+        text = guide_text()
         assert "func.type = signature" in text
         assert "func.type = parsed" not in text
 
@@ -123,17 +155,17 @@ class TestGuideContent:
         """Without one, only refs to that exact byte are found."""
         import re
 
-        text = GUIDE_PATH.read_text()
+        text = guide_text()
         assert not re.search(r"get_code_refs\(\w+\)", text)
 
     def test_states_the_timeout_and_that_it_discards_the_batch(self):
-        text = GUIDE_PATH.read_text()
+        text = guide_text()
         assert "30-second limit" in text
         assert "reverted when it eventually finishes" in text
 
     def test_covers_the_idioms_a_live_run_had_to_discover(self):
         """Each of these cost round trips in a real session."""
-        text = GUIDE_PATH.read_text()
+        text = guide_text()
         for idiom in (
             "func.hlil.instructions",  # locating one address in a big body
             "get_ascii_string_at",  # reading a C string at a pointer
@@ -146,7 +178,7 @@ class TestGuideContent:
     def test_covers_working_across_two_databases(self):
         """The task the tool is uniquely suited to — two binaries open at
         once — had no section at all until a real port needed one."""
-        text = GUIDE_PATH.read_text()
+        text = guide_text()
         assert "## Working across two databases" in text
         assert 'define_user_type("config_t", tobj)' in text
 
@@ -154,20 +186,20 @@ class TestGuideContent:
         """Guessing from naming conventions over-reports badly, and writing
         auto-generated names in as annotations is the failure the guide's
         first rule warns about."""
-        text = GUIDE_PATH.read_text()
+        text = guide_text()
         assert "is_var_user_defined" in text
         assert "user_type_container" in text
         assert "auto_discovered" in text
 
     def test_warns_that_rendered_il_is_not_a_semantic_diff(self):
-        text = GUIDE_PATH.read_text()
+        text = guide_text()
         assert "MLIL_STORE" in text
         assert "address_comments" in text
 
     def test_warns_against_touching_qt(self):
         """Scripts run on a worker thread; Qt from off the main thread
         segfaults Binary Ninja, and nothing stops the model trying."""
-        text = GUIDE_PATH.read_text()
+        text = guide_text()
         assert "Do not touch the GUI" in text
         assert "worker thread" in text
         assert "binaryninjaui" in text
@@ -175,21 +207,21 @@ class TestGuideContent:
     def test_tells_the_model_the_filesystem_is_available(self):
         """Without this the model assumes a sandbox and works around it, which
         is both slower and more token-expensive than just reading the file."""
-        text = GUIDE_PATH.read_text()
+        text = guide_text()
         assert "There is no sandbox" in text
         assert "original_filename" in text
 
     def test_says_select_rebinds_bv_immediately(self):
-        assert "rebinds `bv` immediately" in GUIDE_PATH.read_text()
+        assert "rebinds `bv` immediately" in guide_text()
 
     def test_carries_no_project_specific_leftovers(self):
         """Guidance must generalise: no target-specific names, no dead API."""
-        text = GUIDE_PATH.read_text().lower()
+        text = guide_text().lower()
         for leftover in ("nrf5", "softdevice", "ble_gap", "binja._bv", "binja."):
             assert leftover not in text, leftover
 
     def test_tells_the_model_not_to_build_its_own_rollback(self):
         """Transactions make a rollback feature unnecessary; say so."""
-        text = GUIDE_PATH.read_text()
+        text = guide_text()
         assert "one undo transaction" in text
         assert "should not build your own" in text

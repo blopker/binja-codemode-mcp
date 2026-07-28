@@ -19,6 +19,22 @@ class ExecutionResult:
     timed_out: bool = False
     elapsed_s: float = 0.0
     timeout_s: float = 0.0
+    reverted: bool = False
+
+
+@dataclass
+class _Outcome:
+    """Scratch shared with the worker thread.
+
+    Deliberately not an ExecutionResult. On timeout the caller is handed a
+    result while this thread is still running, and the thread keeps writing
+    here afterwards — copying the fields out at return time is what stops a
+    script that finished late from mutating a value the caller already has.
+    """
+
+    error: str | None = None
+    reverted: bool = False  # set by the worker, read by the caller
+    abandoned: bool = False  # set by the caller, read by the worker
 
 
 class _Budget:
@@ -57,14 +73,6 @@ class _Budget:
             f"\n... (truncated at {self.max_bytes} bytes; "
             "filter or paginate before printing)"
         )
-
-
-def _unmodified(bv: Any) -> bool:
-    """True only when the file is known-clean; False if unreadable."""
-    try:
-        return not bv.file.modified
-    except Exception:
-        return False
 
 
 class CodeExecutor:
@@ -158,24 +166,35 @@ class CodeExecutor:
             # instead of the switch only taking effect on the next call.
             on_scope(scope)
 
-        state: dict[str, Any] = {"error": None, "abandoned": False}
-        clean_before = _unmodified(bv)
+        outcome = _Outcome()
 
         def settle(undo: Any, revert: bool) -> None:
-            """Close the undo state, skipping calls that provably do nothing.
+            """Always close the undo state.
 
-            Reverting or committing makes the core redraw the view, which is
-            disruptive if the script never touched the database — and most
-            failures are a typo or an AttributeError on the first line.
+            KNOWN COST: revert_undo_actions raises the Binary Ninja window,
+            even when the transaction recorded nothing. So every failed script
+            — a typo, an AttributeError on line one — pulls the GUI to the
+            foreground. Measured in isolation against a live instance: an empty
+            commit is silent, an empty revert pops. Accepted deliberately.
+
+            The tempting fix is to skip the settle when nothing changed, and
+            there is no sound way to know that. An earlier version gated on
+            `bv.file.modified`, which does not track script mutations at all —
+            it stays False through a rename — so the skip silently stopped
+            failed scripts reverting, and a raised script kept its changes.
+            `undoable_actions()` does not exist; `file.undo_entries` only grows
+            on commit, so it cannot answer the question in flight either.
+
+            Committing first and calling bv.undo() when an entry appears would
+            work, but the signal is unverifiable from inside a transaction, and
+            it leaves the failed batch on the redo stack where a stray redo
+            resurrects it. Not worth trading the guarantee for a window raise.
             """
-            if clean_before and _unmodified(bv):
-                # The file was clean going in and is clean now, so this
-                # transaction is empty either way.
-                return
             if revert:
                 bv.revert_undo_actions(undo)
-            else:
-                bv.commit_undo_actions(undo)
+                outcome.reverted = True
+                return
+            bv.commit_undo_actions(undo)
 
         def run() -> None:
             # The manual undo API rather than `with bv.undoable_transaction()`:
@@ -188,10 +207,10 @@ class CodeExecutor:
                 # BaseException, not Exception: sys.exit() inside a script
                 # reverts the batch just the same, so reporting success for it
                 # would be a lie.
-                state["error"] = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
+                outcome.error = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
                 settle(undo, revert=True)
             else:
-                settle(undo, revert=bool(state["abandoned"]))
+                settle(undo, revert=outcome.abandoned)
             finally:
                 self._started_at = None
                 self._idle.set()
@@ -205,7 +224,7 @@ class CodeExecutor:
             # The thread cannot be killed. Mark the batch abandoned so it
             # reverts instead of committing after this call has already reported
             # failure, and leave the lock held so nothing overlaps it.
-            state["abandoned"] = True
+            outcome.abandoned = True
             elapsed = time.time() - (self._started_at or time.time())
             return ExecutionResult(
                 success=False,
@@ -223,13 +242,14 @@ class CodeExecutor:
 
         output = budget.value()
         elapsed = time.time() - started
-        if state["error"]:
+        if outcome.error:
             return ExecutionResult(
                 success=False,
                 output=output,
-                error=state["error"],
+                error=outcome.error,
                 elapsed_s=elapsed,
                 timeout_s=self.timeout,
+                reverted=outcome.reverted,
             )
         return ExecutionResult(
             success=True, output=output, elapsed_s=elapsed, timeout_s=self.timeout

@@ -16,6 +16,12 @@ from urllib.parse import urlparse
 
 MAX_BODY_BYTES = 8 * 1024 * 1024
 
+# The MCP layer budgets every text field it assembles; this is the backstop for
+# anything that gets past it. A response cannot be clipped — trimming serialized
+# JSON yields bytes no client can parse — so an oversized one is refused whole.
+# If this fires it is a bug in the output budget, not a routine outcome.
+MAX_RESPONSE_BYTES = 1024 * 1024
+
 # How long shutdown() can block: serve_forever() only notices the stop flag
 # between polls. The stdlib default of 0.5s stalls the Qt main thread when the
 # user clicks the status-bar button to stop the server.
@@ -138,6 +144,10 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _send(self, status: int, payload: dict[str, Any]) -> None:
         body = json.dumps(payload).encode("utf-8")
+        if len(body) > MAX_RESPONSE_BYTES:
+            body = json.dumps(_response_too_large(payload.get("id"), len(body))).encode(
+                "utf-8"
+            )
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
@@ -154,6 +164,21 @@ class _Handler(BaseHTTPRequestHandler):
 
 def _parse_error(message: str = "Parse error") -> dict[str, Any]:
     return {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": message}}
+
+
+def _response_too_large(msg_id: Any, size: int) -> dict[str, Any]:
+    return {
+        "jsonrpc": "2.0",
+        "id": msg_id,
+        "error": {
+            "code": -32603,
+            "message": (
+                f"Response of {size} bytes exceeds the {MAX_RESPONSE_BYTES}-byte "
+                "limit and was withheld. This is a bug in the server's output "
+                "budget; please report it."
+            ),
+        },
+    }
 
 
 def _invalid_request(message: str) -> dict[str, Any]:

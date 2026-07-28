@@ -210,6 +210,16 @@ guide's content.
   change when tabs open and close, and the guide header is regenerated per call.
 - `uicontext.list_tabs()` depends on `binaryninjaui` methods that have no type stubs. If
   they misbehave it degrades to single-binary mode rather than reporting no binary open.
+- **A failed script pulls the Binary Ninja window to the foreground.** Every failure
+  reverts its undo transaction, and `revert_undo_actions` raises the window even when the
+  transaction recorded nothing — so a typo costs a window raise. Confirmed by isolating
+  the cases against a live instance: an empty *commit* is silent, an empty *revert* pops.
+  Skipping the revert when nothing changed would fix it, but nothing available answers
+  "did this script change anything" reliably (`file.modified` does not move on a rename;
+  `file.undo_entries` only grows at commit), and an earlier attempt to gate on
+  `file.modified` silently stopped failed scripts reverting at all. The redraw is
+  cosmetic; the revert is the guarantee the plugin exists for. See `settle()` in
+  `plugin/executor.py`.
 
 ## License
 

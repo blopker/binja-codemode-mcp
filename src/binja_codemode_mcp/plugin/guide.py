@@ -84,7 +84,8 @@ def render(status: dict[str, Any], topic: str | None = None) -> str:
                 return f"{header}\n\n{body}"
         available = ", ".join(repr(t) for t in topics(markdown))
         return (
-            f"{header}\n\nNo section named {topic!r}. Available sections: {available}. "
+            f"{header}\n\nNo section named {topic[:60]!r}. "
+            f"Available sections: {available}. "
             "Omit `topic` for the whole guide."
         )
 

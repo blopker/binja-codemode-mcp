@@ -15,6 +15,7 @@ import pytest
 
 from binja_codemode_mcp.plugin.server import (
     MAX_BODY_BYTES,
+    MAX_RESPONSE_BYTES,
     MCPHTTPServer,
     origin_allowed,
 )
@@ -222,6 +223,38 @@ class TestDisconnects:
         sk.close()  # RST mid-request
         time.sleep(0.3)
         assert "Traceback" not in capfd.readouterr().err
+
+
+class TestResponseBudget:
+    """The MCP layer budgets every field it assembles; this is the backstop.
+    Clipping serialized JSON would hand a client bytes it cannot parse, so an
+    oversized response is refused whole instead."""
+
+    def test_an_oversized_response_is_refused_not_clipped(self):
+        class BigHandler:
+            def handle(self, message):
+                return {
+                    "jsonrpc": "2.0",
+                    "id": message["id"],
+                    "result": {"x": "y" * (MAX_RESPONSE_BYTES + 1000)},
+                }
+
+        server = MCPHTTPServer(BigHandler(), host="127.0.0.1", port=0, api_key=API_KEY)
+        url = server.start()
+        try:
+            status, body = post(url, {"jsonrpc": "2.0", "id": 9, "method": "ping"})
+        finally:
+            server.stop()
+
+        parsed = json.loads(body)  # must be parseable, not a clipped fragment
+        assert status == 200
+        assert parsed["id"] == 9
+        assert parsed["error"]["code"] == -32603
+
+    def test_a_normal_response_passes_through_untouched(self, endpoint):
+        status, body = post(endpoint, {"jsonrpc": "2.0", "id": 3, "method": "ping"})
+        assert status == 200
+        assert json.loads(body)["result"]["echo"]["id"] == 3
 
 
 class TestLifecycle:
