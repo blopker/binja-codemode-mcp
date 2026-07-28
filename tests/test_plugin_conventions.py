@@ -6,6 +6,8 @@ import ast
 import json
 from pathlib import Path
 
+import pytest
+
 # tomllib is 3.11+; the project pins 3.10 to match Binary Ninja's interpreter.
 import tomli
 
@@ -45,6 +47,37 @@ class TestImportOrder:
             assert order.index("binaryninjaui") < order.index("PySide6"), (
                 f"{path.name} must import binaryninjaui before PySide6"
             )
+
+
+class TestCommandEntryPoints:
+    """The server resolves its target per request, so nothing that starts or
+    stops it may require a BinaryView. Both callers — PluginCommand.register_global
+    and the status-bar button — invoke these with no arguments."""
+
+    def _method(self, name: str) -> ast.FunctionDef:
+        tree = ast.parse((PACKAGE / "plugin" / "commands.py").read_text())
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == name:
+                return node
+        raise AssertionError(f"commands.py has no {name}()")
+
+    @pytest.mark.parametrize("name", ["start_server", "stop_server", "show_status"])
+    def test_callable_with_no_arguments(self, name):
+        node = self._method(name)
+        args = node.args
+        required = [a for a in args.args[1:]]  # drop self
+        defaults = args.defaults
+        assert len(defaults) >= len(required), (
+            f"{name}() must be callable as {name}(); register_global passes "
+            "no arguments and the status-bar button does the same"
+        )
+
+    def test_commands_are_registered_globally(self):
+        """PluginCommand.register is BinaryView-scoped and hides the commands
+        until a file is open."""
+        source = (PACKAGE / "plugin" / "commands.py").read_text()
+        assert "PluginCommand.register_global(" in source
+        assert "PluginCommand.register(" not in source
 
 
 class TestPackaging:

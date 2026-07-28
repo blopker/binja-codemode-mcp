@@ -74,29 +74,14 @@ def _on_button_click():
         return
 
     try:
+        # No BinaryView needed either way: the server resolves its target per
+        # request and is meant to be startable with nothing open.
         if _plugin_instance.is_running:
-            _plugin_instance.stop_server(None)
+            _plugin_instance.stop_server()
         else:
-            bv = _get_active_binary_view()
-            if bv is None:
-                log_debug("MCP Status: No active BinaryView. Open a file first.")
-                return
-            _plugin_instance.start_server(bv)
+            _plugin_instance.start_server()
     except Exception as e:
         log_error(f"MCP Status: Error toggling server: {e}")
-
-
-def _get_active_binary_view():
-    """Get the currently active BinaryView from the UI context."""
-    ctx = UIContext.activeContext()
-    if ctx is None:
-        return None
-
-    view_frame = ctx.getCurrentViewFrame()
-    if view_frame is None:
-        return None
-
-    return view_frame.getCurrentBinaryView()
 
 
 def _update_status_indicator():
