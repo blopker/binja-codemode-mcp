@@ -11,14 +11,19 @@ window; the driver should say what to check and stop for an answer.
 
 ## Setup
 
-Do not run this against work you care about. Make throwaway copies:
+Do not run this against work you care about. Make throwaway copies, from the repo root:
 
 ```sh
-mkdir -p /tmp/binja-driver && cd /tmp/binja-driver
-cp /bin/ls ls-a && cp /bin/ls ls-b && cp /bin/cat other
+mkdir -p scratch/driver
+cp /bin/ls scratch/driver/ls-a
+cp /bin/ls scratch/driver/ls-b
+cp /bin/cat scratch/driver/other
 ```
 
-Open `ls-a` in Binary Ninja, let analysis finish, and start the server
+`scratch/` is gitignored, so the copies and the `.bndb` files Binary Ninja writes next to
+them stay out of the repo.
+
+Open `scratch/driver/ls-a` in Binary Ninja, let analysis finish, and start the server
 (`Plugins > Code Mode MCP > Start Server`). Leave `ls-b` and `other` closed for now.
 
 **Never write GUI code.** Scripts run on a worker thread, and calling into Qt or
@@ -91,7 +96,7 @@ vanished on save.
 print `bv.file.filename`. Expect the same path all three times. A "no longer open" error
 on call two would mean the session cannot hold a target at all.
 
-**C2 [human] — open a second binary.** Ask the user to open `/tmp/binja-driver/ls-b` in a
+**C2 [human] — open a second binary.** Ask the user to open `scratch/driver/ls-b` in a
 new tab and let it analyse. Then call `h.binaries()`: expect two entries, with `ls-a`
 still `selected: True`.
 
@@ -167,7 +172,10 @@ Finish with:
 
 ## Cleanup
 
+Close the tabs in Binary Ninja first, then:
+
 ```sh
-rm -rf /tmp/binja-driver
+rm -rf scratch/driver
 ```
-Close the tabs without saving, or discard the `.bndb` files alongside the copies.
+
+That removes the copies and any `.bndb` files written beside them.
