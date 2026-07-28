@@ -83,15 +83,25 @@ class PluginBackend:
                 ),
             )
 
+        target = tab.bv if tab else None
+        was_modified = _is_modified(target)
+
         result = self.executor.execute(
             code,
-            bv=tab.bv if tab else None,
+            bv=target,
             bn=self._bn,
             helpers=self.helpers,
             on_scope=self.helpers.bind_scope,
         )
 
-        if result.success and self._on_mutation is not None:
+        # Only touch the UI when the script actually changed something. Most
+        # calls are reads, and refreshing after one is both pointless work and
+        # a visible interruption for whoever is using the window.
+        if (
+            result.success
+            and self._on_mutation is not None
+            and _is_modified(target) != was_modified
+        ):
             self._on_mutation()
         return result
 
@@ -129,6 +139,14 @@ class PluginBackend:
             return str(self._bn.core_version())
         except Exception:
             return None
+
+
+def _is_modified(bv: Any) -> bool | None:
+    """The file's dirty flag, or None if it cannot be read."""
+    try:
+        return bool(bv.file.modified)
+    except Exception:
+        return None
 
 
 def render_status_report(

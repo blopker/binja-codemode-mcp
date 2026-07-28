@@ -11,11 +11,18 @@ import pytest
 from binja_codemode_mcp.plugin.session import BinaryTab
 
 
+class _FileMetadata:
+    def __init__(self, filename: str) -> None:
+        self.filename = filename
+        self.original_filename = filename
+        self.modified: bool = False
+
+
 class FakeBinaryView:
     """Just enough BinaryView to exercise the executor and backend."""
 
     def __init__(self, name: str = "target", functions: int = 3) -> None:
-        self.file = type("FileMetadata", (), {"filename": f"/bin/{name}"})()
+        self.file = _FileMetadata(f"/bin/{name}")
         self.view_type = "Mach-O"
         self.arch = type("Arch", (), {"name": "aarch64"})()
         self.platform = type("Platform", (), {"name": "macos-aarch64"})()
@@ -49,6 +56,7 @@ class FakeBinaryView:
 
     def rename(self, name: str) -> None:
         self.renames.append(name)
+        self.file.modified = True
 
 
 @pytest.fixture

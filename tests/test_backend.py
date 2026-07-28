@@ -84,15 +84,22 @@ class TestExecute:
         assert not result.success
         assert "No binary selected" in (result.error or "")
 
-    def test_refresh_hook_fires_only_on_success(self, config, tabs):
+    def test_refresh_fires_only_when_something_changed(self, config, tabs):
+        """Refreshing after a read is pointless work and, in the GUI, a
+        visible interruption for whoever is using the window."""
         calls: list[int] = []
         backend = PluginBackend(
             config, tabs_provider=lambda: tabs, on_mutation=lambda: calls.append(1)
         )
-        backend.execute("pass")
+
+        backend.execute("print(len(bv.functions))")
+        assert calls == [], "a read-only script must not touch the UI"
+
+        backend.execute("bv.rename('changed')")
         assert calls == [1]
+
         backend.execute("raise ValueError('x')")
-        assert calls == [1]
+        assert calls == [1], "a failed script reverts, so nothing to refresh"
 
 
 class TestModuleGlobal:
