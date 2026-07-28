@@ -122,3 +122,30 @@ def refresh_views() -> None:
 
     with contextlib.suppress(Exception):
         execute_on_main_thread_and_wait(refresh)
+
+
+def focus_log() -> None:
+    """Bring the Log pane to the front.
+
+    Output that only reaches a closed Log pane looks like the command did
+    nothing. The exact accessor and widget title are not in any header we can
+    read, so try the plausible routes and give up quietly — the message is
+    already in the log either way.
+    """
+
+    def show() -> None:
+        for ctx in UIContext.allContexts():
+            area = None
+            with contextlib.suppress(Exception):
+                area = ctx.globalArea()
+            if area is None:
+                continue
+            for method in ("focusWidgetWithTitle", "activateWidgetWithTitle"):
+                try:
+                    getattr(area, method)("Log")
+                    return
+                except Exception:
+                    continue
+
+    with contextlib.suppress(Exception):
+        execute_on_main_thread_and_wait(show)

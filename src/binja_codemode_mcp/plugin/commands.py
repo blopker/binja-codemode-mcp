@@ -5,10 +5,10 @@ from binaryninja import PluginCommand
 from binaryninja.log import log_error, log_info
 
 from ..config import Config
-from .backend import PluginBackend
+from .backend import PluginBackend, render_status_report
 from .mcp import MCPHandler
 from .server import MCPHTTPServer
-from .uicontext import list_tabs, refresh_views
+from .uicontext import focus_log, list_tabs, refresh_views
 from .widget import update_status
 
 
@@ -86,15 +86,18 @@ class BinjaCodeModeMCP:
 
     def show_status(self, bv: object = None) -> None:
         if self._config is None or self._backend is None:
-            log_info("Code Mode MCP: NOT RUNNING")
-            return
-
-        log_info("Code Mode MCP: RUNNING")
-        log_info(f"  Endpoint: {self._config.endpoint}")
-        log_info(f"  API key:  {self._config.api_key}")
-        for tab in self._backend.status().get("tabs", []):
-            marker = "*" if tab["selected"] else " "
-            log_info(f"  {marker} [{tab['index']}] {tab['name']}")
+            report = render_status_report(None, None, None)
+        else:
+            report = render_status_report(
+                self._config.endpoint,
+                self._config.api_key,
+                self._backend.status().get("tabs", []),
+            )
+        for line in report.splitlines():
+            log_info(line)
+        # Surface the Log pane: output nobody can see reads as a broken menu
+        # item, which is how this looked before.
+        focus_log()
 
     def register_commands(self) -> None:
         # register_global, not register: the BinaryView-scoped variant hides
@@ -111,7 +114,9 @@ class BinjaCodeModeMCP:
             self.stop_server,
         )
         PluginCommand.register_global(
-            "Code Mode MCP\\Show Status",
-            "Show endpoint, API key, and open binaries",
+            # Named for where the output goes: focus_log() is best effort, so
+            # the menu item should not imply a window will appear.
+            "Code Mode MCP\\Show Status in Log",
+            "Write endpoint, API key, and open binaries to the Log pane",
             self.show_status,
         )

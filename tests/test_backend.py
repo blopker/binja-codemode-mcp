@@ -3,7 +3,7 @@
 import pytest
 
 from binja_codemode_mcp.config import Config
-from binja_codemode_mcp.plugin.backend import PluginBackend
+from binja_codemode_mcp.plugin.backend import PluginBackend, render_status_report
 from binja_codemode_mcp.plugin.session import BinaryTab
 
 
@@ -119,3 +119,34 @@ class TestGuide:
 
     def test_topic_narrows_the_output(self, backend):
         assert len(backend.guide("Types")) < len(backend.guide(None))
+
+
+class TestStatusReport:
+    """Show Status previously wrote only to the Log pane, so with that pane
+    closed the menu item looked broken."""
+
+    def test_not_running_says_how_to_start(self):
+        out = render_status_report(None, None, None)
+        assert "NOT RUNNING" in out
+        assert "Start Server" in out
+
+    def test_running_shows_a_pasteable_connect_command(self):
+        out = render_status_report("http://127.0.0.1:9/mcp", "k3y", [])
+        assert "http://127.0.0.1:9/mcp" in out
+        assert "k3y" in out
+        assert "claude mcp add --transport http" in out
+
+    def test_running_with_no_binary_open_says_so(self):
+        assert "No binaries are open." in render_status_report("e", "k", [])
+
+    def test_marks_the_selected_binary(self):
+        out = render_status_report(
+            "e",
+            "k",
+            [
+                {"index": 0, "name": "ls", "selected": False},
+                {"index": 1, "name": "libfoo", "selected": True},
+            ],
+        )
+        assert "  * [1] libfoo" in out
+        assert "    [0] ls" in out

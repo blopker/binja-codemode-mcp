@@ -113,6 +113,45 @@ class PluginBackend:
             return None
 
 
+def render_status_report(
+    endpoint: str | None,
+    api_key: str | None,
+    tabs: list[dict[str, Any]] | None,
+) -> str:
+    """The text behind Plugins > Code Mode MCP > Show Status.
+
+    `endpoint` is None when the server is not running.
+    """
+    if endpoint is None:
+        return (
+            "Code Mode MCP: NOT RUNNING\n\n"
+            "Start it from Plugins > Code Mode MCP > Start Server, "
+            "or click the indicator in the status bar."
+        )
+
+    lines = [
+        "Code Mode MCP: RUNNING",
+        "",
+        f"  Endpoint: {endpoint}",
+        f"  API key:  {api_key}",
+        "",
+        "Connect a client with:",
+        "",
+        f"  claude mcp add --transport http binja {endpoint} \\",
+        f'    --header "Authorization: Bearer {api_key}"',
+        "",
+    ]
+    if not tabs:
+        lines.append("No binaries are open.")
+    else:
+        lines.append("Open binaries (* = selected):")
+        lines += [
+            f"  {'*' if tab['selected'] else ' '} [{tab['index']}] {tab['name']}"
+            for tab in tabs
+        ]
+    return "\n".join(lines)
+
+
 def _describe_binary(bv: Any, name: str) -> dict[str, Any]:
     """Facts the model would otherwise waste a round trip discovering."""
 
