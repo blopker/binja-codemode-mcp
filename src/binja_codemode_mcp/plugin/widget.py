@@ -1,20 +1,22 @@
-"""
-MCP Status Widget for Binary Ninja status bar.
+"""MCP status indicator for the Binary Ninja status bar.
 
-Provides a clickable status indicator showing MCP server state.
+A clickable button showing whether the server is running.
+
+This module is only reachable in GUI mode — the package entry point guards on
+`core_ui_enabled()` — so it imports Qt unconditionally rather than hiding the
+dependency behind a try/except that leaves every name possibly-unbound.
 """
 
 from binaryninja import execute_on_main_thread
-from binaryninja.log import log_debug, log_error, log_info
+from binaryninja.log import log_debug, log_error
 
-try:
-    from binaryninjaui import UIContext, UIContextNotification
-    from PySide6.QtCore import Qt, QTimer
-    from PySide6.QtWidgets import QHBoxLayout, QPushButton, QWidget
-
-    _HAS_UI = True
-except ImportError:
-    _HAS_UI = False
+# binaryninjaui MUST be imported before PySide6: it selects the PySide6 build
+# that matches the host, and importing PySide6 first can load the wrong one and
+# crash. A test guards this ordering. It is also a compiled extension with no
+# type stubs, hence the ignore.
+from binaryninjaui import UIContext, UIContextNotification  # type: ignore[attr-defined]
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtWidgets import QHBoxLayout, QPushButton, QWidget
 
 # Module-level state
 _status_button = None
@@ -41,7 +43,7 @@ def _create_status_button():
     _status_button = QPushButton()
     _status_button.setObjectName("mcpStatusButton")
     _status_button.setFlat(True)
-    _status_button.setCursor(Qt.PointingHandCursor)
+    _status_button.setCursor(Qt.CursorShape.PointingHandCursor)
     _status_button.setToolTip("Click to start/stop MCP server")
     _status_button.setContentsMargins(0, 0, 0, 0)
     _status_button.setStyleSheet(
@@ -106,34 +108,6 @@ def _update_status_indicator():
     _status_button.setText(_get_status_text(running))
 
 
-def _on_file_closed(context, frame):
-    """Handle file closed by stopping MCP server if no binary views remain."""
-    global _plugin_instance
-
-    if _plugin_instance is None or not _plugin_instance.is_running:
-        return
-
-    # Check if there are any binary views still open after a delay
-    # This gives Binary Ninja time to switch to another tab if one exists
-    def delayed_check():
-        import time
-
-        time.sleep(0.3)  # Give the UI some time to update
-
-        active_bv = _get_active_binary_view()
-
-        if active_bv is None:
-            log_debug("MCP: No binary views remain, stopping server")
-            _plugin_instance.stop_server(None)
-        else:
-            log_debug("MCP: Binary views still open, keeping server running")
-
-    # Run the check in a background thread to avoid blocking
-    import threading
-
-    threading.Thread(target=delayed_check, daemon=True).start()
-
-
 def _ensure_indicator_in_status_bar():
     """Ensure the status indicator is present in the status bar."""
     global _status_container
@@ -149,6 +123,8 @@ def _ensure_indicator_in_status_bar():
 
     # Create button if needed
     container = _create_status_button()
+    if container is None:
+        return
 
     # Get status bar from main window
     status_bar = main_window.statusBar()
@@ -187,9 +163,15 @@ class MCPUINotification(UIContextNotification):
         execute_on_main_thread(lambda: _update_status_indicator())
 
     def OnAfterCloseFile(self, context, file, frame):
-        """Called after a file is closed - stop MCP server if no views remain."""
-        log_debug("MCP Status: File closed, checking for remaining views")
-        execute_on_main_thread(lambda: _on_file_closed(context, frame))
+        """Called after a file is closed.
+
+        The server deliberately keeps running with no binary open. Stopping it
+        would yank the endpoint out from under any connected MCP client, which
+        would mark the server failed and require a reconnect; reporting "no
+        binary open" per request is better.
+        """
+        log_debug("MCP Status: file closed; server left running")
+        execute_on_main_thread(lambda: _update_status_indicator())
 
 
 def init_status_indicator(plugin_instance):
@@ -198,11 +180,7 @@ def init_status_indicator(plugin_instance):
     Args:
         plugin_instance: The BinjaCodeModeMCP plugin instance
     """
-    global _indicator_timer, _ui_notification, _plugin_instance, _HAS_UI
-
-    if not _HAS_UI:
-        log_debug("MCP Status: UI not available (headless mode)")
-        return
+    global _indicator_timer, _ui_notification, _plugin_instance
 
     _plugin_instance = plugin_instance
 
@@ -225,12 +203,11 @@ def update_status(running: bool):
     Args:
         running: Whether the server is running
     """
-    global _status_button, _HAS_UI
-
-    if not _HAS_UI or _status_button is None:
+    button = _status_button
+    if button is None:
         return
 
-    execute_on_main_thread(lambda: _status_button.setText(_get_status_text(running)))
+    execute_on_main_thread(lambda: button.setText(_get_status_text(running)))
 
 
 def cleanup_status_indicator():

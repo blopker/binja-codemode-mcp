@@ -1,241 +1,197 @@
 # Binary Ninja Code Mode MCP
 
-A Model Context Protocol (MCP) server for [Binary Ninja](https://binary.ninja/) that enables LLM-assisted reverse engineering through code execution.
+An MCP server that lets an LLM drive a live Binary Ninja session by writing Python
+against the **real** Binary Ninja API.
 
-## Overview
+There is no wrapper API to learn. Inside a tool call the model gets `bv` — the actual
+`BinaryView` — plus the `binaryninja` module, real builtins, and real imports. Models
+already know this API from api.binary.ninja, so they use it correctly instead of guessing
+at a bespoke dialect.
 
-This plugin implements [Anthropic's Code Execution pattern](https://www.anthropic.com/engineering/code-execution-with-mcp). Instead of accessing the typical MCP "tools", the LLM writes Python code that executes directly against Binary Ninja's API. This approach ([described by Cloudflare as "Code Mode"](https://blog.cloudflare.com/code-mode/)) is more token-efficient and enables more complex multi-step analyses in a single execution.
+Each call runs in one undo transaction: if the script raises, every change it made is
+reverted, and a successful batch collapses to a single ⌘Z.
 
-## Key Features
+macOS, GUI, personal use.
 
-- Write Python that runs directly against Binary Ninja's API
-- Query and mutate the binary database
-- Checkpoint/rollback, persistent workspace files, and reusable analysis patterns
-- Basic security with API key authentication and some code validation
+## Install
 
-## Installation
-
-### Method 1: Plugin Manager (Recommended)
-
-1. In Binary Ninja, open the Plugin Manager (`Plugins > Manage Plugins`)
-2. Search for `Code Mode MCP` or `binja_codemode_mcp`
-3. Click `Install`
-4. Restart Binary Ninja
-
-After installation, the plugin will be located in the community [plugins](https://docs.binary.ninja/guide/plugins.html) folder:
-
-```bash
-# Linux
-~/.binaryninja/plugins/repositories/community/plugins/akrutsinger_binja_codemode_mcp/
-
-# macOS
-~/Library/Application Support/Binary Ninja/plugins/repositories/community/plugins/akrutsinger_binja_codemode_mcp/
-
-# Windows
-%APPDATA%\Binary Ninja\plugins\repositories\community\plugins\akrutsinger_binja_codemode_mcp\
+```sh
+make install
 ```
 
-### Method 2: Manual Installation
+That symlinks `src/binja_codemode_mcp` into your Binary Ninja plugins folder, so editing
+the repo edits the plugin directly. Restart Binary Ninja afterwards. Override the location
+with `make install BN_USER_DIR=...` if yours differs.
 
-Clone or download this repository and copy to your Binary Ninja [plugins](https://docs.binary.ninja/guide/plugins.html) folder:
+Nothing to pip install — Binary Ninja's bundled Python 3.10 has everything the plugin
+needs.
 
-```bash
-# Linux
-cp -r plugin/ ~/.binaryninja/plugins/binja_codemode_mcp/
+## Use
 
-# macOS
-cp -r plugin/ ~/Library/Application\ Support/Binary\ Ninja/plugins/binja_codemode_mcp/
+1. Open a binary.
+2. `Plugins → Code Mode MCP → Start Server`, or click the status-bar indicator.
+3. The log prints the endpoint, the API key, and a ready-to-paste command:
 
-# Windows
-copy plugin\ %APPDATA%\Binary Ninja\plugins\binja_codemode_mcp\
+```sh
+claude mcp add --transport http binja http://127.0.0.1:42069/mcp \
+  --header "Authorization: Bearer binja-codemode-local"
 ```
 
-## MCP Client Configuration
+Then just ask:
 
-Configure your MCP client to communicate with the plugin. The path to `mcp_bridge.py` depends on your installation method.
+- "Decompile main and tell me what the argument parsing does."
+- "Find every caller of memcpy and check whether the size is bounded."
+- "Name and type the functions in the 0x3a000 range from how their callers use them."
 
-### For Plugin Manager Installation 
+## What the model gets
 
-[**Zed**](https://zed.dev/) (`Agent Panel > ... > Add Custom Server...`):
+**Tools**
+
+- `execute` — run Python against the selected binary.
+- `binja_guide` — live session state (which binary, architecture, analysis status, open
+  tabs, Binary Ninja version) plus practical guidance on types, data variables, function
+  prototypes, and the API calls that behave surprisingly.
+
+**Globals inside `execute`**
+
+| Name | What |
+|---|---|
+| `bv` | The real `BinaryView` |
+| `bn` | The `binaryninja` module |
+| `h` | `h.binaries()`, `h.select(index_or_name)` |
+
+Guidance is delivered three ways, because clients surface each differently: the MCP
+`instructions` field (always in context), the tool descriptions, and the `binja_guide`
+tool. Resources exist too, but nothing depends on them — in Claude Code a resource is
+`@`-mention only and the model cannot read one on its own.
+
+## Multiple binaries
+
+Open as many as you like. The session pins one on first use and stays on it even when you
+click another tab, so a long analysis cannot retarget under the model's feet.
+`h.binaries()` lists them; `h.select(1)` or `h.select("libfoo")` switches. The guide
+header lists open tabs on every call.
+
+## Configuration
+
+Optional, at `<user dir>/codemode_mcp/config.json`:
+
 ```json
-{
-  /// The name of your MCP server
-  "binja-codemode-mcp": {
-    /// The command which runs the MCP server
-    "command": "python3",
-    /// The arguments to pass to the MCP server
-    "args": ["~/.binaryninja/plugins/repositories/community/plugins/akrutsinger_binja_codemode_mcp/bridge/mcp_bridge.py"],
-    /// The environment variables to set
-    "env": {
-      "BINJA_MCP_URL": "http://127.0.0.1:42069",
-      "BINJA_MCP_KEY": "binja-codemode-local"
-    }
-  }
-}
+{ "api_key": "your-key" }
 ```
 
-[**Claude Desktop**](https://www.claude.com/download) (`Settings > Developer > Edit Config`):
-```json
-{
-  "mcpServers": {
-    "binja-codemode-mcp": {
-      "command": "python3",
-      "args": ["~/Library/Application Support/Binary Ninja/plugins/repositories/community/plugins/akrutsinger_binja_codemode_mcp/bridge/mcp_bridge.py"],
-      "env": {
-        "BINJA_MCP_URL": "http://127.0.0.1:42069",
-        "BINJA_MCP_KEY": "binja-codemode-local"
-      }
-    }
-  }
-}
+The server binds `127.0.0.1`, validates `Origin`, and requires the bearer token.
+
+## Safety
+
+This runs arbitrary Python inside your Binary Ninja process, with your permissions, and
+there is deliberately no sandbox. An AST filter over submitted code cannot contain it —
+CPython injects the real `builtins` module whenever the globals dict has no
+`__builtins__` key, so `open` and `__import__` stay reachable at runtime no matter what
+the filter rejects by name — while it does reliably block legitimate stdlib use like
+`struct` and `pathlib`. The undo transaction is the real protection: a failed script
+reverts, and any batch can be undone in one step. Point it at trusted clients only.
+
+## Design notes
+
+**The real API, not a wrapper.** A curated `binja.*` facade looks like it saves tokens and
+does the opposite: models already know `BinaryView` from pretraining, so a smaller dialect
+costs far more in failed calls and hallucination recovery than the curation saves. It also
+goes stale against the API it wraps. Exposing `bv` deletes that whole class of problem.
+
+**One transaction per call.** Mutations applied outside `bv.undoable_transaction()` do not
+register as undo actions, which means Binary Ninja's modified-tracking may not fire and
+the edits can be lost on save. Wrapping the whole script also makes a tool call atomic and
+collapses a batch to one ⌘Z, which is what a checkpoint/rollback feature would otherwise
+try — and fail — to provide.
+
+**Stateless calls.** Nothing persists between `execute` calls: no variables, no imports.
+Re-deriving state is cheaper than reasoning about a namespace neither side can see.
+
+**Per-request binary resolution.** Capturing a `BinaryView` once means a second tab is
+unreachable and edits can land on a stale view. The target is resolved per request and
+pinned per session, so the model's target is stable but never wrong.
+
+**Three guidance layers**, because clients surface each differently. The `instructions`
+field is always in context; tool descriptions load when a tool is pulled in; `binja_guide`
+is unbounded and on demand. Both `instructions` and tool descriptions are truncated at
+2 KB by some clients, so they stay short and front-loaded — tests enforce the budget.
+
+## Development
+
+```sh
+make setup      # uv sync
+make check      # lint + typecheck + tests
+make fmt        # apply autofixes and format
+make install    # symlink into Binary Ninja
+make status     # is it linked, is the endpoint up
 ```
 
-**Note:** Use absolute paths. Replace `~` with your home directory path if needed, and adjust for your OS.
+`make help` lists everything.
 
-### For Manual Installation
+`.python-version` pins 3.10 to match Binary Ninja's bundled interpreter; testing on newer
+Python would pass code that fails in the host. There are no runtime dependencies, and
+there must not be — the plugin has to load without pip, so there is deliberately no
+`requirements.txt` for the plugin manager to act on.
 
-Use these paths instead:
-- Linux: `~/.binaryninja/plugins/binja_codemode_mcp/bridge/mcp_bridge.py`
-- macOS: `~/Library/Application Support/Binary Ninja/plugins/binja_codemode_mcp/bridge/mcp_bridge.py`
-- Windows: `%APPDATA%\Binary Ninja\plugins\binja_codemode_mcp\bridge\mcp_bridge.py`
+### Iterating inside Binary Ninja
 
-### Custom API Key (Optional)
+`make install` symlinks the package, so edits land immediately — but Python still has the
+old modules loaded. In Binary Ninja's Python console:
 
-To use a custom API key instead of the default API key, create `~/.binaryninja/codemode_mcp/config.json`:
-```json
-{
-  "api_key": "your-custom-key"
-}
+```python
+import binja_codemode_mcp, importlib
+importlib.reload(binja_codemode_mcp)
 ```
 
-Then update your MCP client config to use the same key in `BINJA_MCP_KEY`.
+Then `[UP] [ENTER]` to re-run after each edit. Two caveats: `PluginCommand.register` calls
+run again on reload, so menu entries can duplicate until restart, and a running server
+keeps serving the modules it was started with — stop it, reload, start it again. When
+anything looks stale, restart Binary Ninja.
 
-### Logging Configuration (Optional)
+For step debugging, `pip install --user debugpy`, then call
+`connect_vscode_debugger(port=12345)` in the Binary Ninja console and attach with a path
+mapping of `/` to `/`.
 
-Set `BINJA_MCP_LOG_LEVEL` environment variable to control logging output (stderr):
-```bash
-# Options: DEBUG, INFO (default), WARNING, ERROR, CRITICAL
-export BINJA_MCP_LOG_LEVEL=DEBUG
-```
+### Testing without a licence
 
-Or add to your MCP client config:
-```json
-"env": {
-  "BINJA_MCP_URL": "http://127.0.0.1:42069",
-  "BINJA_MCP_KEY": "binja-codemode-local",
-  "BINJA_MCP_LOG_LEVEL": "DEBUG"
-}
-```
+`import binaryninja` succeeds outside the GUI, so **pyright resolves real types** from the
+app bundle. `binaryninja.load()` does not — a Personal licence forbids headless — so
+**pytest can never construct a real `BinaryView`**. Three consequences:
 
-## Usage
+- A module that imports `binaryninja` at module scope poisons the import path for
+  everything under it. Hence the guarded import in `binja_codemode_mcp/__init__.py` and
+  the empty `plugin/__init__.py`.
+- Everything except `commands.py`, `widget.py`, and `uicontext.py` is pure and directly
+  testable. `tests/conftest.py` supplies a small `FakeBinaryView` for the rest. It stays
+  small on purpose: a large fake would mean we had rebuilt the wrapper we removed.
+- `tests/test_integration.py` drives the whole stack over a real socket and asserts on
+  what a client actually receives.
 
-1. Open Binary Ninja and load a binary
-2. Start the server: `Plugins > MCP Code Mode > Start Server`
-3. In your MCP client (Claude, Zed, etc.), start prompting!
+### Checks that only work by hand
 
-### Example Prompts
-```
-"List all functions that reference memcpy and check if they validate buffer sizes"
+Whether a transaction reaches the `.bndb` cannot be tested here. After changing the
+executor or the session, in Binary Ninja:
 
-"Decompile main() and identify potential security issues"
+- Rename ~20 functions via `execute`; confirm the view updates, ⌘Z reverts the batch as
+  one step, and the names survive save → close → reopen.
+- Raise an exception halfway through a mutating script; confirm nothing was applied.
+- Open two binaries; confirm the session stays pinned when you switch tabs.
 
-"Create a checkpoint, then rename all sub_* functions based on their behavior"
+To find friction the tests cannot, ask a model to use the server and report where it
+struggled, then fold the findings into `guide.md`. That loop is what produced most of the
+guide's content.
 
-"Find and categhorize all string references by type (URL, file path, error message, etc.)"
+### Known limitations
 
-"Analyze the binary's attack surface by examining input validation in network-facing functions"
-```
-
-## API Overview
-
-The Python code written by the LLM has access to the `binja` object with these methods:
-
-### Query
-**Binary Info**
-- `binja.get_binary_status()` - Binary metadata
-- `binja.list_functions()` - All functions
-- `binja.analyze_function_batch()` - Batched function alaysis
-- `binja.list_imports()` - Imported symbols
-- `binja.list_exports()` - Exported symbols
-- `binja.list_segments()` - Memory segments
-- `binja.list_classes()` - Classes
-- `binja.list_namespaces()` - Namespaces
-- `binja.list_data_items()` - Data items
-
-**Code Analysis**
-- `binja.decompile()` - Get pseudocode
-- `binja.get_assembly()` - Get disassembly
-- `binja.get_basic_blocks()` - Basic function info
-
-**Cross References**
-- `binja.get_xrefs_to()` - Find callers
-- `binja.get_function_calls()` - Find callees
-- `binja.get_data_xrefs_to()` - Data references to address
-- `binja.get_data_xrefs_from()` - Data references from address
-
-**Data Reading**
-- `binja.read_bytes()` - Read raw bytes
-- `binja.read_string()` - Read string
-- `binja.get_string_at()` - Get string info
-- `binja.get_data_var_at()` - Get data variable info
-- `binja.list_strings()` - List all strings
-
-**Search & Lookup**
-- `binja.find_bytes()` - Search for byte pattern
-- `binja.function_at()` - Get function by address or name
-- `binja.get_comment()` - Get comment
-- `binja.get_function_comment()` - Get function comment
-- `binja.get_type()` - Get User-defined struct/type info
-
-### Mutations
-
-**Renaming**
-- `binja.rename_function(func, name)` - Rename function
-- `binja.rename_data()` - Rename data
-- `binja.rename_variable(func, old, new)` - Rename variable
-
-**Typing**
-- `binja.retype_variable()` - Retype variable
-- `binja.define_type()` - Define struct/type
-- `binja.set_function_signature()` - Set prototype
-
-**Comments**
-- `binja.set_comment()` - Add comment
-- `binja.set_function_comment()` - Add function comment
-- `binja.delete_comment()` - Delete comment
-- `binja.delete_function_comment()` - Delete function comment
-
-### Workspace
-
-**File Persistence**
-- `binja.write_file()` - Save to workspace
-- `binja.read_file()` - Read from workspace
-- `binja.list_files()` - List workspace files
-- `binja.delete_file()` - Delete workspace 
-
-### Skills
-
-**Reusable Code**
-- `binja.save_skill(name, code, desc)` - Save reusable code
-- `binja.load_skill(name)` - Load a skill
-- `binja.list_skills()` - List saved skills
-- `binja.delete_skill()` - Delete a skill
-
-### Helpers
-- `binja.find_functions_calling_unsafe()` - Find functions calling potentially unsafe functions
-- `binja.get_function_complexity()` - Get cyclomatic complexity
-
-## Security
-
-A basic level of security in attempt to prevent some misuse:
-
-- Localhost-only binding (127.0.0.1)
-- API key authentication required
-- Simple code validation blocks potentially dangerous operations
-- 30-second execution timeout
-
-**Note:** This plugin does execute arbitrary Python code. Only use with trusted MCP clients and LLMs.
+- The execution timeout abandons its worker thread rather than killing it, so a
+  `while True:` leaks a thread — with its transaction still open — for the life of the
+  process.
+- `tools/list_changed` is advertised but never emitted: the tool surface does not actually
+  change when tabs open and close, and the guide header is regenerated per call.
+- `uicontext.list_tabs()` depends on `binaryninjaui` methods that have no type stubs. If
+  they misbehave it degrades to single-binary mode rather than reporting no binary open.
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) for details.
+MIT — see [LICENSE](LICENSE).

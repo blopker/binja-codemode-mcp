@@ -1,0 +1,55 @@
+[project]
+name = "binja-codemode-mcp"
+version = "0.2.0"
+description = "MCP server for LLM-assisted reverse engineering via code execution in Binary Ninja"
+requires-python = ">=3.10"
+# No runtime dependencies, by design. Binary Ninja's bundled Python 3.10 ships a
+# complete stdlib; the plugin must never need pip at load time.
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "ruff>=0.9",
+    "pyright>=1.1.390",
+    "tomli>=2",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-q --strict-markers"
+
+[tool.ruff]
+target-version = "py310"
+src = ["src", "tests"]
+# Never reflow Markdown. guide.md is a product surface the model reads and is
+# hand-wrapped on purpose.
+extend-exclude = ["*.md"]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle
+    "F",   # pyflakes
+    "W",   # warnings
+    "I",   # import sorting
+    "UP",  # pyupgrade
+    "B",   # bugbear
+    "SIM", # simplify
+]
+
+[tool.pyright]
+pythonVersion = "3.10"
+typeCheckingMode = "standard"
+include = ["src", "tests"]
+# Binary Ninja's API is not pip-installable. Point pyright at the copy inside the
+# app bundle; this is why the project is macOS-only for development.
+# `import binaryninja` succeeds outside the GUI, so pyright resolves real types.
+# Creating a BinaryView does not — a Personal licence forbids headless, which is
+# why tests use a fake instead.
+extraPaths = [
+    "src",
+    "/Applications/Binary Ninja.app/Contents/Resources/python",
+    # PySide6 ships inside the app bundle, not on PyPI for this interpreter.
+    "/Applications/Binary Ninja.app/Contents/Resources/python3",
+]
