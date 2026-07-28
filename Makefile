@@ -4,7 +4,7 @@ LINK        := $(PLUGINS_DIR)/binja_codemode_mcp
 SOURCE      := $(CURDIR)/src/binja_codemode_mcp
 
 .DEFAULT_GOAL := help
-.PHONY: help setup check test lint fmt typecheck install uninstall status clean
+.PHONY: help setup test lint fmt typecheck install uninstall status clean
 
 help: ## Show this help
 	@grep -hE '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -14,7 +14,7 @@ setup: ## Install dev dependencies
 	uv sync
 
 test: lint typecheck ## Everything that gates a commit
-	uv run pytest
+	uv run pytest -v --durations=0
 
 lint: ## Check formatting and lint rules
 	uv run ruff check .
@@ -25,7 +25,7 @@ fmt: ## Apply autofixes and format
 	uv run ruff format .
 
 typecheck: ## Type-check against the real Binary Ninja API
-	uv run pyright
+	uv run ty check src tests
 
 install: ## Symlink the plugin into Binary Ninja
 	@mkdir -p "$(PLUGINS_DIR)"

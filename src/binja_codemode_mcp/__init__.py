@@ -10,7 +10,7 @@ except ImportError:
     # Not running inside Binary Ninja (pytest, ruff, CI). Importing the package
     # must never require the host application, or the pure modules under it
     # become untestable.
-    binaryninja = None
+    binaryninja = None  # type: ignore
 
 # Only load GUI components when running with UI
 if binaryninja is not None and binaryninja.core_ui_enabled():

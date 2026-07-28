@@ -16,7 +16,7 @@ from binaryninja import execute_on_main_thread_and_wait
 
 # binaryninjaui is a compiled extension with no type stubs, so pyright cannot
 # see its members. Only imported from GUI-only call paths.
-from binaryninjaui import UIContext  # type: ignore[attr-defined]
+from binaryninjaui import UIContext  # type: ignore
 
 from .session import BinaryTab
 

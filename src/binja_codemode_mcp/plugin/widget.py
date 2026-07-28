@@ -14,7 +14,7 @@ from binaryninja.log import log_debug, log_error
 # that matches the host, and importing PySide6 first can load the wrong one and
 # crash. A test guards this ordering. It is also a compiled extension with no
 # type stubs, hence the ignore.
-from binaryninjaui import UIContext, UIContextNotification  # type: ignore[attr-defined]
+from binaryninjaui import UIContext, UIContextNotification  # type: ignore
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import QHBoxLayout, QPushButton, QWidget
 

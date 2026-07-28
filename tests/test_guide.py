@@ -1,5 +1,7 @@
 """Guide assembly: the live session header, section lookup, and content rules."""
 
+from typing import Any
+
 from binja_codemode_mcp.plugin.guide import (
     GUIDE_PATH,
     render,
@@ -8,7 +10,7 @@ from binja_codemode_mcp.plugin.guide import (
     topics,
 )
 
-FULL_STATUS = {
+FULL_STATUS: dict[str, Any] = {
     "binja_version": "5.3.9757",
     "binary": {
         "name": "ls",

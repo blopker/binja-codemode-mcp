@@ -121,7 +121,7 @@ is unbounded and on demand. Both `instructions` and tool descriptions are trunca
 
 ```sh
 make setup      # uv sync
-make check      # lint + typecheck + tests
+make test       # lint + typecheck + tests
 make fmt        # apply autofixes and format
 make install    # symlink into Binary Ninja
 make status     # is it linked, is the endpoint up
@@ -133,6 +133,11 @@ make status     # is it linked, is the endpoint up
 Python would pass code that fails in the host. There are no runtime dependencies, and
 there must not be — the plugin has to load without pip, so there is deliberately no
 `requirements.txt` for the plugin manager to act on.
+
+Type checking runs on [ty](https://github.com/astral-sh/ty), pointed at the Binary Ninja
+API inside the app bundle. It is pre-1.0, so expect its diagnostics to shift between
+releases. Write suppressions as a bare `# type: ignore`; ty also accepts
+`# ty: ignore[rule]`.
 
 ### Iterating inside Binary Ninja
 
@@ -155,8 +160,8 @@ mapping of `/` to `/`.
 
 ### Testing without a licence
 
-`import binaryninja` succeeds outside the GUI, so **pyright resolves real types** from the
-app bundle. `binaryninja.load()` does not — a Personal licence forbids headless — so
+`import binaryninja` succeeds outside the GUI, so **the type checker resolves real types**
+from the app bundle. `binaryninja.load()` does not — a Personal licence forbids headless — so
 **pytest can never construct a real `BinaryView`**. Three consequences:
 
 - A module that imports `binaryninja` at module scope poisons the import path for
