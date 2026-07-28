@@ -4,7 +4,11 @@ import textwrap
 
 import pytest
 
-from binja_codemode_mcp.plugin.executor import CodeExecutor
+from binja_codemode_mcp.plugin.executor import (
+    KEEP_SOURCES,
+    SCRIPT_PREFIX,
+    CodeExecutor,
+)
 
 
 @pytest.fixture
@@ -224,6 +228,45 @@ class TestErrors:
         to be. Vacuous when the script changed nothing; never wrong."""
         assert run("raise ValueError('boom')").reverted is True
         assert run("bv.rename('x')\nraise ValueError('boom')").reverted is True
+
+    def test_a_traceback_shows_the_line_that_raised(self, run):
+        """Without the script text registered where linecache can find it, a
+        frame reads `File "<mcp:1>", line 2` with no source — a line number
+        into code the model has to remember."""
+        result = run("x = 1\nraise ValueError('boom')")
+        assert "raise ValueError('boom')" in (result.error or "")
+
+    def test_a_refused_script_does_not_evict_the_running_ones_source(self, bv):
+        """Overlapping requests are real — the server is threaded. Publishing
+        before the busy check let a handful of refusals push the winner's own
+        text out of a cache that only holds a few, silently and permanently
+        costing it source lines and its h.lib entries' `.source`."""
+        import linecache
+        import threading
+
+        gate = threading.Event()
+        executor = CodeExecutor(timeout=0.05)
+        running = executor.execute("gate.wait(5)", bv=bv, extra={"gate": gate})
+        assert running.timed_out
+        mine = sorted(k for k in linecache.cache if k.startswith(SCRIPT_PREFIX))[-1]
+
+        for i in range(KEEP_SOURCES * 3):
+            executor.execute(f"x = {i}", bv=bv)
+
+        assert mine in linecache.cache
+        gate.set()
+        executor.wait_for_idle(timeout=5)
+
+    def test_script_sources_do_not_accumulate(self, bv):
+        """They are held for `inspect.getsource` on saved functions; retained
+        per call forever they would grow for the life of the process."""
+        import linecache
+
+        executor = CodeExecutor()
+        for i in range(30):
+            executor.execute(f"x = {i}", bv=bv)
+        held = [k for k in linecache.cache if k.startswith(SCRIPT_PREFIX)]
+        assert len(held) <= 10
 
     def test_syntax_error_is_reported_without_running_anything(self, run, bv):
         result = run("def broken(")

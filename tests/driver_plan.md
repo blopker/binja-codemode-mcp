@@ -243,11 +243,49 @@ Anything that pops *outside* this pattern — a `binja_guide` call, a read that 
 nothing — is new and worth reporting.
 
 
+## G. The per-session library
+
+New and unproven. The question this section answers is not "does it work" — the suite
+covers that — but **does a model reach for it unprompted, and does it change how the work
+goes**. Run G1–G6 as checks, then answer G7 honestly, including "I ignored it".
+
+**G1 — save and reuse.** Define a function in one call, save it with
+`h.lib["name"] = fn`, call it in a later call. Confirm the result footer lists it as
+`| lib: name`.
+
+**G2 — the rebinding.** Save a function that returns `bv.file.filename`. Call it, then
+`h.select` the other binary and call it again. The two answers must differ. This is the
+entire premise: a stored function that reported the first binary forever would be exactly
+the staleness it exists to avoid.
+
+**G3 — output from inside.** A saved function that calls `print()` must have its output
+come back in the calling script's result, not vanish.
+
+**G4 — the refusals.** Each of these must fail with a message that says why:
+a function closing over a value (`def outer(): captured = bv; def inner(): ...`), an
+imported function (`h.lib["d"] = json.dumps`), and a non-function (`h.lib["c"] = 5`).
+Report whether the message told you what to do instead. Then confirm the opposite case
+works: a script that does `import json` at the top and saves a function using it must
+still work when that function is called several scripts later.
+
+**G5 — inspect and remove.** `print(h.lib)`, `h.lib.<name>.source`, `h.lib_sources()`,
+then `del h.lib.<name>`. Confirm the listing shows signatures and docstrings and that the
+source is the text you saved.
+
+**G6 — error quality.** Scripts now report the *line* that raised, not just its number.
+Confirm on an ordinary failure, then on a raise inside a function saved 15+ calls earlier
+— the second is the case where the source has to be republished from the library.
+
+**G7 — was it worth it?** Did you save anything without being told to? Did you call a
+saved function more than once? If you re-emitted the same code across calls instead of
+saving it, say so — that is the outcome that would retire the feature. Note also whether
+the footer listing was noise or useful.
+
 ---
 
 ## Report format
 
-Report F1–F4 as a four-line yes/no table; everything else as `PASS`, `FAIL`, or
+Report F1–F3 as a three-line yes/no table; everything else as `PASS`, `FAIL`, or
 `SKIPPED (reason)`. For a failure, give the exact code
 sent, the exact response, and what was expected. Do not fix, retry differently, or work
 around a failure before recording it — the workaround is the finding.

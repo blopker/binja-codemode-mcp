@@ -3,12 +3,45 @@
 Pure module: `bv` is duck-typed, so this is testable without Binary Ninja.
 """
 
+import itertools
+import linecache
 import threading
 import time
 import traceback
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
+
+# Scripts are compiled under a unique pseudo-filename per call, and their text
+# is registered where linecache can find it. That buys two things: tracebacks
+# quote the line that raised instead of just numbering it, and inspect.getsource
+# works on functions the script saved into h.lib.
+SCRIPT_PREFIX = "<mcp:"
+KEEP_SOURCES = 8  # recent scripts whose text stays available
+_call_seq = itertools.count(1)
+
+
+def next_script_name() -> str:
+    """A fresh pseudo-filename to compile a script under."""
+    return f"{SCRIPT_PREFIX}{next(_call_seq)}>"
+
+
+def publish_source(name: str, code: str) -> None:
+    """Make a script's text available to linecache, evicting older ones.
+
+    The mtime slot holds None deliberately: it is the sentinel
+    `linecache.checkcache()` skips, and traceback rendering calls checkcache on
+    every frame — with a real mtime the entry is purged before it is ever read.
+
+    Call this only for a script that is about to run. Publishing on the way in
+    would let scripts that never ran — refused because another was still
+    running, or rejected for a syntax error — evict the text of the one that
+    did, permanently costing it source lines and h.lib's `.source`.
+    """
+    linecache.cache[name] = (len(code), None, code.splitlines(True), name)
+    held = [k for k in linecache.cache if k.startswith(SCRIPT_PREFIX)]
+    for stale in held[:-KEEP_SOURCES]:  # insertion order is age order
+        linecache.cache.pop(stale, None)
 
 
 @dataclass
@@ -20,6 +53,7 @@ class ExecutionResult:
     elapsed_s: float = 0.0
     timeout_s: float = 0.0
     reverted: bool = False
+    lib: tuple[str, ...] = field(default_factory=tuple)
 
 
 @dataclass
@@ -120,8 +154,9 @@ class CodeExecutor:
                 ),
             )
 
+        script_name = next_script_name()
         try:
-            compiled = compile(code, "<mcp>", "exec")
+            compiled = compile(code, script_name, "exec")
         except SyntaxError as e:
             return ExecutionResult(success=False, output="", error=f"Syntax error: {e}")
 
@@ -137,6 +172,7 @@ class CodeExecutor:
                 ),
             )
 
+        publish_source(script_name, code)
         started = time.time()
         self._started_at = started
         self._idle.clear()

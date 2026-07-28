@@ -15,6 +15,7 @@ from typing import Any, Protocol
 MAX_RESULT_BYTES = 40_000  # assembled text of one tool result
 MAX_ERROR_BYTES = 4_000  # the Error: section reserved inside it
 MAX_MESSAGE_BYTES = 2_000  # a JSON-RPC error message or tool-error string
+MAX_FOOTER_LIB_BYTES = 200  # the h.lib name list inside the footer
 
 PROTOCOL_VERSION = "2025-06-18"
 SERVER_NAME = "binja-codemode-mcp"
@@ -31,6 +32,9 @@ Drive a live Binary Ninja session by writing Python.
 know from api.binary.ninja. Globals: `bv` (the selected BinaryView), `bn` (the
 binaryninja module), `h` (this plugin's few helpers).
 
+Calls are otherwise stateless, but `h.lib["name"] = fn` saves a function for later
+ones; it re-runs against the live database whenever you call `h.lib.name()`.
+
 Call `binja_guide` before your first non-trivial script: it reports the live session
 and the API calls that behave surprisingly.
 
@@ -42,15 +46,17 @@ Run Python against the selected binary in Binary Ninja: every query and every ed
 reading bytes, decompiling, renaming, applying types, adding comments.
 
 Globals: `bv` (real BinaryView), `bn` (binaryninja module), `h` (helpers:
-`h.binaries()`, `h.select(index_or_name)`). Real builtins and imports work.
+`h.binaries()`, `h.select(index_or_name)`, `h.lib`). Real builtins and imports work.
 
 `print()` is the return channel: verbatim, capped at 32 KB; a traceback comes back
 trimmed to its last 4 KB. Print addresses as hex. Do NOT iterate every function and
 decompile — filter to a handful first, or you blow the cap and the 30s limit.
 
 The whole script runs in one undo transaction: an exception reverts every change it
-made, and nothing persists to the next call. Call `bv.update_analysis_and_wait()`
-after changing a function type or signature, or later reads see stale analysis.
+made. Nothing persists to the next call except functions you save — `h.lib["name"] =
+fn`, then `h.lib.name()` — which re-run against the live database. Call
+`bv.update_analysis_and_wait()` after changing a function type or signature, or later
+reads see stale analysis.
 
 Read `binja_guide` first if you have not yet."""
 
@@ -186,6 +192,7 @@ class MCPHandler:
             footer = _footer(
                 getattr(result, "elapsed_s", 0.0) or 0.0,
                 getattr(result, "timeout_s", None),
+                tuple(getattr(result, "lib", ()) or ()),
             )
             tail = ""
             if result.error:
@@ -292,11 +299,30 @@ def _clip_error(error: str, limit: int) -> str:
     return out if _size(out) <= limit else _clip_head(out, limit)
 
 
-def _footer(elapsed: float, budget: float | None) -> str:
-    """Throughput signal. Batch sizing against the timeout is otherwise guesswork."""
-    if budget:
-        return f"\n\n[{elapsed:.1f}s of {budget:.0f}s]"
-    return f"\n\n[{elapsed:.1f}s]"
+def _footer(elapsed: float, budget: float | None, lib: tuple[str, ...] = ()) -> str:
+    """Throughput signal, plus whatever is saved in h.lib.
+
+    Batch sizing against the timeout is otherwise guesswork, and a library
+    nobody can see is one the model re-derives or wrongly trusts.
+    """
+    timing = f"{elapsed:.1f}s of {budget:.0f}s" if budget else f"{elapsed:.1f}s"
+    if not lib:
+        return f"\n\n[{timing}]"
+    return f"\n\n[{timing} | lib: {_lib_names(lib)}]"
+
+
+def _lib_names(lib: tuple[str, ...]) -> str:
+    """Bounded: a large library must not crowd out the result it annotates."""
+    shown: list[str] = []
+    used = 0
+    for name in lib:
+        used += _size(name) + 2
+        # Always name at least one, clipped if it has to be: a bare "+N more"
+        # tells the model it has a library but not what is in it.
+        if shown and used > MAX_FOOTER_LIB_BYTES:
+            return ", ".join(shown) + f", +{len(lib) - len(shown)} more"
+        shown.append(_clip_head(name, MAX_FOOTER_LIB_BYTES))
+    return ", ".join(shown)
 
 
 def _tool_text(text: str, limit: int, *, is_error: bool) -> dict[str, Any]:

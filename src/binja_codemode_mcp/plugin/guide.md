@@ -22,21 +22,23 @@ Binary Ninja's main thread, so importing `binaryninjaui` or `PySide6` and callin
 widget — `findChildren`, `windowTitle`, anything on `UIContext` — crashes Binary Ninja
 outright, losing unsaved analysis. Nothing stops you. Everything you need is on `bv`.
 
-**Nothing carries over between calls**: no variables, no imports, no open handles.
-`print()` is the return channel, verbatim and capped at 32 KB, so filter rather than dump;
-a failing script returns the tail of its traceback, trimmed to 4 KB.
+**Nothing carries over between calls** — no variables, no imports, no open handles —
+except functions you save in `h.lib`. `print()` is the return channel, verbatim and
+capped at 32 KB, so filter rather than dump; a failing script returns the tail of its
+traceback, trimmed to 4 KB.
 Print addresses as hex — the API returns ints while the disassembly shows hex, and
 mixing them loses your place.
 
 ## Environment
 
 `bv` is the selected `BinaryView` — the real thing, not a wrapper — and `bn` is the
-`binaryninja` module. Everything on `bv` works, and so does ordinary Python. Two helpers
-cover what the Binary Ninja API does not:
+`binaryninja` module. Everything on `bv` works, and so does ordinary Python. A few
+helpers cover what the Binary Ninja API does not:
 
 - `h.binaries()` — list open tabs.
 - `h.select(index_or_name)` — pick which one to work on. It rebinds `bv` immediately, so
   you can select and then edit in the same script.
+- `h.lib` — functions saved for later calls, and `h.lib_sources()` to dump them.
 
 **You have the filesystem.** There is no sandbox: `open()`, `pathlib`, `struct`,
 `hashlib`, `subprocess` all work. Reading the file on disk alongside the analysis is often
@@ -64,6 +66,63 @@ print(len(candidates))
 for f in candidates[:5]:
     print(hex(f.start), f.name)
 ```
+
+## A per-session library
+
+`h.lib` holds functions for the rest of the session. Save anything you will run more than
+once — a filter, a check, a port step — and call it from later scripts instead of
+re-emitting the code and getting it subtly different each time.
+
+```python
+def unported(src=1):
+    """Addresses named in the source build but not in the destination."""
+    h.select(src)
+    names = {f.start: f.name for f in bv.functions}
+    h.select(0)
+    return [a for a, n in names.items()
+            if (g := bv.get_function_at(a)) and g.name != n]
+
+h.lib["unported"] = unported
+```
+
+Then, from any later call:
+
+```python
+h.lib.unported()          # runs against whatever is selected NOW
+h.lib["unported"]()       # the same entry
+print(h.lib)              # what is saved, with signatures
+h.lib.unported.source     # the exact text you saved
+h.lib_sources()           # every definition, to carry into a new session
+del h.lib.unported        # or del h.lib["unported"]
+```
+
+It stores **functions, never results**, so there is no stale value to reason about: a
+saved function re-derives against the live database on every call, and gets that call's
+`bv`, `h` and `print`. The footer on every result lists what is saved.
+
+Three things it will not accept, each because rebinding would break it:
+
+- a function that closes over a value from the call that defined it — that value would be
+  frozen inside it. Take it as a parameter.
+- a function from anywhere but your script; an imported one needs its own module's globals.
+- anything that is not a function.
+
+Top-level names the function uses come along with it, so an `import json` or a
+`THRESHOLD = 10` above the `def` still works when it is called three scripts later. Only
+`bv`, `bn`, `h` and `print` are refreshed per call, and nothing the *calling* script
+happens to define can reach inside a saved function. That carrying is also the one way a
+stale value can get in: keep it to imports and constants, and take anything read out of
+the database as a parameter.
+
+Saved functions reach each other — and recurse — through `h.lib`, never by bare name:
+`h.lib.base()`, not `base()`. Key an entry the same as its `def` unless you mean to
+rename it.
+
+A failed script keeps its definitions: the undo transaction reverts the database, not the
+library, so you can fix the caller without re-sending the function.
+
+This saves re-emitting code, not recomputation — `h.lib.collect()` still walks every
+function each time you call it.
 
 ## Working across two databases
 

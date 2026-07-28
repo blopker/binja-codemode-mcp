@@ -109,6 +109,51 @@ class TestTools:
         assert text.startswith("line one\n")
         assert text.rstrip().endswith("[2.5s of 30s]")
 
+    def test_the_footer_lists_saved_library_functions(self, handler):
+        """`h.lib` is invisible otherwise: the model cannot see what it saved
+        two calls ago, and neither can anyone reading the transcript."""
+        text = _text(
+            handler,
+            success=True,
+            output="ok\n",
+            elapsed_s=1.0,
+            timeout_s=30.0,
+            lib=("unported", "port_types"),
+        )
+        assert text.rstrip().endswith("[1.0s of 30s | lib: unported, port_types]")
+
+    def test_no_library_section_when_nothing_is_saved(self, handler):
+        text = _text(
+            handler, success=True, output="ok\n", elapsed_s=1.0, timeout_s=30.0
+        )
+        assert text.rstrip().endswith("[1.0s of 30s]")
+
+    def test_a_large_library_cannot_crowd_out_the_result(self, handler):
+        text = _text(
+            handler,
+            success=True,
+            output="ok\n",
+            elapsed_s=1.0,
+            timeout_s=30.0,
+            lib=tuple(f"name{i}" for i in range(500)),
+        )
+        assert len(text.encode()) <= MAX_RESULT_BYTES
+        assert "more]" in text
+        assert "lib: name0, name1" in text
+
+    def test_one_absurd_name_does_not_empty_the_listing(self, handler):
+        """Counting the name before deciding whether it fits returned a bare
+        `lib: , +1 more` — a library the model is told about but cannot see."""
+        text = _text(
+            handler,
+            success=True,
+            output="ok\n",
+            elapsed_s=1.0,
+            timeout_s=30.0,
+            lib=("z" * 500,),
+        )
+        assert "lib: zzz" in text
+
     def test_execute_reports_failure_as_a_tool_error(self, handler):
         handler.backend.result = ExecutionResult(
             success=False, output="partial\n", error="ValueError: boom"

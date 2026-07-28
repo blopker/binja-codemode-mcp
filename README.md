@@ -62,7 +62,7 @@ Then just ask:
 |---|---|
 | `bv` | The real `BinaryView` |
 | `bn` | The `binaryninja` module |
-| `h` | `h.binaries()`, `h.select(index_or_name)` |
+| `h` | `h.binaries()`, `h.select(index_or_name)`, `h.lib`, `h.lib_sources()` |
 
 Guidance is delivered three ways, because clients surface each differently: the MCP
 `instructions` field (always in context), the tool descriptions, and the `binja_guide`
@@ -113,8 +113,16 @@ manager, because a batch that outran the timeout has to revert on its way out an
 context manager would commit it. Scripts are serialised for the same reason: two open undo
 states on one database interleave, so reverting one can rewind the other.
 
-**Stateless calls.** Nothing persists between `execute` calls: no variables, no imports.
-Re-deriving state is cheaper than reasoning about a namespace neither side can see.
+**Functions persist, values do not.** No variables or imports survive an `execute` call;
+functions assigned into `h.lib` do. Storing values would mean answering "is this still
+true?" on every read, and a namespace neither side can see is worse than re-deriving.
+A stored function never raises that question — it re-runs against the live database — so
+the library is closer to a per-session set of tools than to a cache. Each entry is rebound
+to the calling script's scope on the way out, because a function otherwise resolves
+globals from the call that defined it: it would see that call's `bv` forever, and its
+`print` would write into an output buffer that closed long ago. The footer lists what is
+saved on every result, so the library is the most visible thing in the session rather
+than the least.
 
 **Per-request binary resolution.** Capturing a `BinaryView` once means a second tab is
 unreachable and edits can land on a stale view. The target is resolved per request and
