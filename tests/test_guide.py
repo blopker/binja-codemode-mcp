@@ -131,6 +131,13 @@ class TestGuideContent:
         assert "30-second limit" in text
         assert "reverted when it eventually finishes" in text
 
+    def test_tells_the_model_the_filesystem_is_available(self):
+        """Without this the model assumes a sandbox and works around it, which
+        is both slower and more token-expensive than just reading the file."""
+        text = GUIDE_PATH.read_text()
+        assert "There is no sandbox" in text
+        assert "original_filename" in text
+
     def test_says_select_rebinds_bv_immediately(self):
         assert "rebinds `bv` immediately" in GUIDE_PATH.read_text()
 

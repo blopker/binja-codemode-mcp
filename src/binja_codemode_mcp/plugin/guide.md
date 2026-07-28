@@ -49,6 +49,22 @@ Everything on `bv` works: `bv.functions`, `bv.get_code_refs()`, `bv.read()`,
   you can select and then edit in the same script. The session stays on your choice even
   if the user switches tabs in the UI.
 
+**You have the filesystem.** There is no sandbox: `open()`, `pathlib`, `struct`,
+`hashlib`, `subprocess` all work. Reading the file on disk alongside the analysis is often
+the shortest path to an answer — diffing two builds byte for byte, checking a region the
+analysis has not typed, or loading a symbol list or SDK header from the project directory.
+
+```python
+raw = bv.file.original_filename   # the binary; bv.file.filename is the .bndb
+with open(raw, "rb") as f:
+    image = f.read()
+print(len(image), image[:16].hex())
+```
+
+Prefer `bv.read()` for anything mapped, since it resolves virtual addresses and reflects
+the analysis; use the file directly when you need bytes the view does not cover, or when
+you need a second binary that is not open in Binary Ninja.
+
 **Do not iterate every function and decompile it.** On a few thousand functions that is
 minutes of analysis and far more output than fits. Filter to a handful first, then look
 closely:
