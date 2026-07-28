@@ -14,6 +14,7 @@ window; the driver should say what to check and stop for an answer.
 Do not run this against work you care about. Make throwaway copies, from the repo root:
 
 ```sh
+rm -rf scratch/driver
 mkdir -p scratch/driver
 cp /bin/ls scratch/driver/ls-a
 cp /bin/ls scratch/driver/ls-b
