@@ -251,6 +251,36 @@ class TestLibrary:
         )
         assert "from the library" in backend.execute("h.lib.shout()").output
 
+    def test_select_inside_a_saved_function_rebinds_its_own_bv(self, config, bv):
+        """The guide's own cross-database example calls h.select() *inside* the
+        saved function. Each retrieval gets its own globals dict, so a select
+        that only wrote to the calling script's scope left the function reading
+        the binary it started on — and the read half of a port then returns an
+        empty result the caller has no reason to distrust."""
+        backend = self._two_binaries(config, bv)
+        backend.execute(
+            "def where():\n"
+            '    h.select("other")\n'
+            "    return bv.file.filename\n"
+            'h.lib["where"] = where'
+        )
+        assert backend.execute("print(h.lib.where())").output.strip() == "/bin/other"
+
+    def test_select_inside_a_saved_function_also_moves_the_caller(self, config, bv):
+        """One selection per session, not one per scope: the script must not
+        carry on writing to the old binary after its helper switched."""
+        backend = self._two_binaries(config, bv)
+        backend.execute('def go():\n    h.select("other")\nh.lib["go"] = go')
+        result = backend.execute("h.lib.go()\nprint(bv.file.filename)")
+        assert result.output.strip() == "/bin/other"
+
+    def test_repeated_retrieval_does_not_accumulate_scopes(self, backend):
+        """A loop calling a saved function is ordinary; one globals dict per
+        call would grow without bound inside a single script."""
+        backend.execute('def noop():\n    return 1\nh.lib["noop"] = noop')
+        backend.execute("for _ in range(50):\n    h.lib.noop()")
+        assert len(backend.helpers.lib._bound) <= 1
+
     def test_saved_functions_call_each_other_through_lib(self, backend):
         backend.execute('def base():\n    return 6\nh.lib["base"] = base')
         backend.execute(

@@ -75,8 +75,9 @@ def render_header(status: dict[str, Any]) -> str:
         lines.append(f"Open tabs: {rendered}")
         if len(tabs) > 1:
             lines.append(
-                "Several binaries are open. The selected one stays selected even if "
-                "the user switches tabs; use h.select(<index>) to change it."
+                "Several binaries are open. The selection above is the target — not "
+                "necessarily the first one opened — and it stays put even if the user "
+                "switches tabs; use h.select(<index>) to change it."
             )
 
     return "\n".join(lines)

@@ -4,7 +4,7 @@ LINK        := $(PLUGINS_DIR)/binja_codemode_mcp
 SOURCE      := $(CURDIR)/src/binja_codemode_mcp
 
 .DEFAULT_GOAL := help
-.PHONY: help setup test lint fmt typecheck install uninstall status clean
+.PHONY: help setup test lint fmt typecheck install uninstall status driver clean
 
 help: ## Show this help
 	@grep -hE '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -53,6 +53,11 @@ status: ## Show install state and whether the server is reachable
 	else \
 		echo "endpoint: not responding — is the server started in Binary Ninja?"; \
 	fi
+
+driver: ## Run the live driver plan in a fresh Claude session
+	@# Low effort: the plan states every case, so the work is following it rather
+	@# than deciding what to do, and a run is dozens of calls long.
+	claude --effort low "Run the live driver plan in @tests/driver_plan.md"
 
 clean: ## Remove caches
 	@find . -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null || true

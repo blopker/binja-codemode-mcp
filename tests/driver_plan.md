@@ -1,12 +1,15 @@
 # Live driver plan
 
-A script for an LLM connected to this server to run against a real Binary Ninja session.
-It covers what the pytest suite cannot: the plugin never touches Binary Ninja in the
-automated tests, so every claim about transactions, tab handling, and the UI is
-unverified until something runs here.
+You are the driver. Work through every case below, in order, against the `binja` MCP
+server. Do not skip one, and do not fix, retry differently, or work around a failure
+before recording it.
 
-The human is needed twice — **Setup** and **Checkpoint** — and not in between. Do not
-scatter extra questions through the run.
+This covers what the pytest suite cannot: the plugin never touches Binary Ninja in the
+automated tests, so every claim about transactions, tab handling, and the UI is unverified
+until something runs here.
+
+The human is needed twice — **Setup** and **Checkpoint** — and not in between. Ask for
+each of those as a single message and wait; do not scatter other questions through the run.
 
 **Never write GUI code.** Scripts run on a worker thread; calling into Qt or
 `binaryninjaui` crashes Binary Ninja and loses unsaved analysis. Nothing prevents it. If a
@@ -49,9 +52,11 @@ Report those three results, then leave it alone until the Checkpoint.
 ## A. Orientation
 
 **A1 — the guide describes the live session.** Call `binja_guide` with no `topic` (the one
-case that wants the whole document). Expect the header to name `ls-a`, a Mach-O view, an
-architecture, a non-zero function count, "Analysis: complete", a version, and two open tabs
-with one marked selected. Any `?`, `0`, or `unknown` is a failure.
+case that wants the whole document). Expect a Mach-O view, an architecture, a non-zero
+function count, "Analysis: complete", a version, and two open tabs with one marked
+selected. Any `?`, `0`, or `unknown` is a failure. Which binary starts selected is up to
+Binary Ninja's tab order and is *not* necessarily the one opened first — read it off the
+header rather than assuming, and `h.select("ls-a")` before section B.
 
 **A2 — the globals are real.** `print(type(bv).__module__, type(bv).__name__)`,
 `bn.core_version()`, `h.binaries()`. Expect `binaryninja.binaryview BinaryView`, a version,
@@ -66,8 +71,9 @@ scoping bug that used to force `global` workarounds.
 
 ## B. Transactions — the reason this rewrite exists
 
-**B1 — a successful batch lands.** Rename five `sub_*` functions to `driver_test_0..4`.
-Read them back in a *second* call.
+**B1 — a successful batch lands.** Rename five `sub_*` functions to `driver_test_0..4`,
+**all in one `execute` call** — the grouping in B3 depends on it. Read them back in a
+*second* call.
 
 **B2 — a failing batch leaves nothing behind.** *The most important case here.* In one
 call, rename three more functions and then `raise ValueError("boom")`. In a second call,
@@ -77,9 +83,14 @@ This regressed silently once — an optimisation gated the revert on `bv.file.mo
 which does not move when a script mutates — and was found by hand, not by the suite. Any
 renamed function here is a partial-state failure and the most serious possible result.
 
-**B3 — one undo step.** `bv.undo()` from a script is what ⌘Z does. Undo once, then read
-the five B1 names back: expect all five reverted **together**. Needing five undos for five
-renames would mean the batch is not one transaction. `bv.redo()` and confirm they return.
+**B3 — one undo step.** `bv.undo()` from a script is what ⌘Z does. First confirm you are
+about to undo the right thing — `[len(e.actions) for e in bv.file.undo_entries][-3:]`
+should show B1's call as a single entry of **five** actions. Then undo once and read the
+five names back: expect all five reverted **together**, and `bv.redo()` to restore them.
+
+A previous run recorded a FAIL here that did not reproduce: five renames spread over more
+than one call give one entry each, which looks identical to broken grouping from the
+undo side. Check the actions count before concluding anything.
 
 ## C. Multiple binaries
 
@@ -161,8 +172,10 @@ first binary forever is exactly the staleness this exists to avoid. Also confirm
 function's `print()` output comes back in the calling script's result.
 
 **G3 — what it carries, what it refuses.** A script that does `import json` at the top and
-saves a function using it must still work several calls later. These must each fail with a
-message saying why: a closure, `h.lib["d"] = json.dumps`, and `h.lib["c"] = 5`.
+saves a function using it must still work several calls later, and so must one reading a
+top-level constant — those are carried deliberately. These must each fail with a message
+saying why: a *nested* function capturing an enclosing local (a top-level name is not a
+closure and is accepted), `h.lib["d"] = json.dumps`, and `h.lib["c"] = 5`.
 
 **G4 — error quality.** Failures now report the *line* that raised, not just its number.
 Confirm on an ordinary failure, then on a raise inside a function saved 15+ calls earlier —
@@ -183,8 +196,6 @@ Ask for all of this in one message, then stop.
    longer does, on the theory that undo-registered changes propagate on their own.
 2. Close the **`ls-b`** tab.
 3. Save `ls-a` (⌘S), close its tab, reopen the `.bndb`.
-4. Keep another application focused for the rest of the run and note which calls pull
-   Binary Ninja forward. Report that once, at the end.
 
 ## F. After the Checkpoint
 
@@ -198,12 +209,6 @@ the next script then wrote to a database nobody had chosen, silently.
 `ls-a`. This is the exact failure the rewrite targets: edits that looked applied and
 vanished on save.
 
-**F3 — the window pop.** A failed script pulls Binary Ninja to the foreground: every
-failure reverts its transaction, and an empty revert pops where an empty commit is silent.
-Documented, accepted, not a bug. Run these one at a time and collect the human's single
-answer: `print(len(bv.functions))` (expect no pop), `print(bv.no_such_attribute)` (expect a
-pop), and a successful rename (at most one). Anything popping outside this pattern is new.
-
 ---
 
 ## Report format
@@ -213,8 +218,8 @@ timestamp — and summarise it in chat. At the scratch root, not `scratch/driver
 Cleanup does not delete it. `scratch/` is gitignored; the findings worth keeping get
 copied out and folded into `guide.md`.
 
-`PASS`, `FAIL`, or `SKIPPED (reason)` per case, plus F3 as a three-line yes/no table. For a
-failure give the exact code sent, the exact response, and what was expected.
+`PASS`, `FAIL`, or `SKIPPED (reason)` per case. For a failure give the exact code sent,
+the exact response, and what was expected.
 
 Finish with:
 

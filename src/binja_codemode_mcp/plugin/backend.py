@@ -71,11 +71,22 @@ class _Library:
     against whatever `bv` is live now.
     """
 
-    _INTERNAL = ("_scope", "_entries")
+    _INTERNAL = ("_scope", "_entries", "_bound")
 
     def __init__(self, scope: Callable[[], dict[str, Any] | None]) -> None:
         self._scope = scope
         self._entries: dict[str, _Saved] = {}
+        # Globals handed to saved functions during the running call, keyed by
+        # entry name so a loop reuses one dict instead of making fifty.
+        self._bound: dict[str, dict[str, Any]] = {}
+
+    def _begin_call(self) -> None:
+        self._bound.clear()
+
+    def _retarget(self, bv: Any) -> None:
+        """Point every scope this call handed out at a newly selected binary."""
+        for globals_ in self._bound.values():
+            globals_["bv"] = bv
 
     def __setitem__(self, key: str, fn: Any) -> None:
         if (
@@ -160,7 +171,10 @@ class _Library:
         to have bound cannot quietly change what a saved function means.
         """
         scope = self._scope() or {}
-        merged = dict(rec.captured)
+        # One globals dict per entry per call, refreshed rather than rebuilt:
+        # h.select() has to be able to find and retarget it, and a saved
+        # function that calls another must not strand either of them.
+        merged = self._bound.setdefault(key, dict(rec.captured))
         merged.update({k: scope[k] for k in LIVE_GLOBALS if k in scope})
         if "__builtins__" in scope:
             merged["__builtins__"] = scope["__builtins__"]
@@ -276,6 +290,7 @@ class Helpers:
         """Called by the executor before a script runs, so select() can rebind
         `bv` for the remainder of that script."""
         self._scope = scope
+        self.lib._begin_call()
 
     def lib_sources(self) -> str:
         """Every saved definition as text, to carry a library to a new session.
@@ -297,6 +312,11 @@ class Helpers:
         tab = self._session.select(key)
         if self._scope is not None:
             self._scope["bv"] = tab.bv
+        # And every saved function's scope. A library function that selects
+        # internally — the shape the guide's own cross-database example uses —
+        # would otherwise keep reading the binary the call started on and
+        # return an empty result rather than an error.
+        self.lib._retarget(tab.bv)
         return {"index": tab.index, "name": tab.name, "path": tab.path}
 
     def __repr__(self) -> str:

@@ -60,8 +60,17 @@ Two ways the file on disk disagrees with the view, both silent — no error, jus
 that are wrong in a plausible way:
 
 - **`seg.data_offset` is relative to the Mach-O slice, not the file.** `/bin/ls` is
-  universal; reading at `data_offset` lands in the *other* architecture's slice. Add the
-  slice offset from the fat header, or stay on `bv.read`.
+  universal, and the first segment's `data_offset` is `0x0` — so reading the file there
+  hands you the fat header (`cafebabe...`), not code, and a later segment lands in the
+  wrong architecture. Stay on `bv.read`, or find the slice base first; the fat header is
+  big-endian:
+
+  ```python
+  magic, nfat = struct.unpack_from(">II", image, 0)
+  for i in range(nfat):
+      cputype, cpusub, offset, size, align = struct.unpack_from(">iiIII", image, 8 + i * 20)
+      print(cputype, hex(offset), hex(size))   # offset is the slice base
+  ```
 - **Chained fixups are resolved in the view and encoded on disk.** A pointer slot in
   `__got` / `__auth_got` reads as `0x100018160` through `bv.read` and as
   `0xc009000000000000` straight from the file. Unpacking raw file bytes hunting for
@@ -130,7 +139,13 @@ Saved functions reach each other — and recurse — through `h.lib`, never by b
 rename it.
 
 A failed script keeps its definitions: the undo transaction reverts the database, not the
-library, so you can fix the caller without re-sending the function.
+library, so you can fix the caller without re-sending the function. So does closing a
+binary — the library belongs to the server session, so saved functions survive a save,
+close and reopen and re-run against the reopened database.
+
+A rule of thumb, because the mistake is not using it at all: **the second time you are
+about to send the same loop, save it instead.** Read-back loops over a fixed set of
+addresses are the usual case.
 
 This saves re-emitting code, not recomputation — `h.lib.collect()` still walks every
 function each time you call it.
@@ -188,7 +203,7 @@ if they were annotations is exactly the wrong-name-is-worse-than-no-name failure
 
 | Object | Is it user work? |
 |---|---|
-| Symbol | `sym.auto` is `False` |
+| Symbol | `sym.auto` is `False`, over `bv.get_symbols()` |
 | Data variable | `var.auto_discovered` is `False` |
 | Function variable | `func.is_var_user_defined(var)` |
 | Type | present in `bv.user_type_container.types` |
@@ -243,13 +258,18 @@ s = bv.get_ascii_string_at(ptr, 1)
 print(s.value if s else None)
 ```
 
+`None` at a *section start* is usually not the length floor: `__cstring` often begins with
+a NUL, so no minimum helps. Scan forward for the first non-zero byte instead.
+
 `bv.strings` has the same floor, and there it is the `analysis.limits.minStringLength`
 setting rather than an argument — default 4, so scanning it for two- and
 three-character strings returns nothing at all. Split the raw section bytes on NULs when
-you need those.
+you need those. Read any setting back with
+`bn.Settings().get_integer("analysis.limits.minStringLength", bv)`.
 
 `bv.sections` is a mapping, not a list: iterate `bv.sections.values()` for `.name`,
-`.start`, `.end`.
+`.start`, `.end`. So is `bv.data_vars`, keyed by address — which the user-vs-auto table
+sends you straight at.
 
 Follow **data** references as well as code ones. A pointer table is referenced by data
 refs, so looking only at `get_code_refs` can miss the consumer entirely:
@@ -281,14 +301,21 @@ instructions instead:
 
 ```python
 func = bv.get_functions_containing(addr)[0]
-for il in func.hlil.instructions:
-    if abs(il.address - addr) < 0x40:
-        print(hex(il.address), il)
+window = [il for il in func.hlil.instructions if abs(il.address - addr) < 0x40]
+for il in sorted(window, key=lambda il: il.address):
+    print(hex(il.address), il)
 ```
 
+**Sort by address.** `.instructions` is not emitted in address order at HLIL or MLIL —
+an inversion typically shows up within the first couple of dozen instructions. Unsorted, a
+window reads as though an instruction is missing.
+
+`func.instructions` yields `(tokens, addr)` pairs, which is how you enumerate
+disassembly addresses in the first place.
+
 **Use the window, not `il.address == addr`.** HLIL folds runs of machine instructions
-onto a subset of addresses: on a 133-function Mach-O, 61% of disassembly addresses have
-no HLIL instruction of their own. An address taken from disassembly, a cross-reference,
+onto a subset of addresses: roughly 60% of disassembly addresses have no HLIL
+instruction of their own (61% and 63% on two 133-function Mach-O binaries). An address taken from disassembly, a cross-reference,
 or a string reference usually matches nothing, and an exact-match loop that finds nothing
 reads as "there is no code here" rather than "wrong query". Narrow to `==` only once the
 window has shown you an address HLIL actually renders at.
