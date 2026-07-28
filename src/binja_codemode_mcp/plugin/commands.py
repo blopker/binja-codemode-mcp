@@ -8,7 +8,7 @@ from ..config import Config
 from .backend import PluginBackend, render_status_report
 from .mcp import MCPHandler
 from .server import MCPHTTPServer
-from .uicontext import focus_log, list_tabs, refresh_views
+from .uicontext import list_tabs, refresh_views
 from .widget import update_status
 
 
@@ -95,9 +95,6 @@ class BinjaCodeModeMCP:
             )
         for line in report.splitlines():
             log_info(line)
-        # Surface the Log pane: output nobody can see reads as a broken menu
-        # item, which is how this looked before.
-        focus_log()
 
     def register_commands(self) -> None:
         # register_global, not register: the BinaryView-scoped variant hides
@@ -114,8 +111,9 @@ class BinjaCodeModeMCP:
             self.stop_server,
         )
         PluginCommand.register_global(
-            # Named for where the output goes: focus_log() is best effort, so
-            # the menu item should not imply a window will appear.
+            # Named for where the output goes. Bringing the Log pane forward
+            # from a plugin does not appear to be reachable, so the name is
+            # what tells the user where to look.
             "Code Mode MCP\\Show Status in Log",
             "Write endpoint, API key, and open binaries to the Log pane",
             self.show_status,
