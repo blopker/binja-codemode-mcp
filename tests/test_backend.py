@@ -56,6 +56,28 @@ class TestExecute:
         assert other.renames == ["landed"]
         assert bv.renames == []
 
+    def test_closing_the_pinned_binary_is_recoverable(self, config, bv):
+        """The session must not be permanently dead: the script does not run
+        when the pin is stale, so advice to call h.select() is unactionable."""
+        other = type(bv)("other")
+        tabs = [
+            BinaryTab(0, "target", "/bin/target", bv),
+            BinaryTab(1, "other", "/bin/other", other),
+        ]
+        open_tabs = [list(tabs)]
+        backend = PluginBackend(config, tabs_provider=lambda: open_tabs[0])
+        backend.execute("pass")  # pins "target"
+
+        open_tabs[0] = [BinaryTab(0, "other", "/bin/other", other)]
+        first = backend.execute("bv.rename('a')")
+        assert not first.success
+        assert "no longer open" in (first.error or "")
+        assert "other" in (first.error or "")
+
+        second = backend.execute("bv.rename('b')")
+        assert second.success, "the session must be usable again"
+        assert other.renames == ["b"]
+
     def test_no_binary_open_is_a_clean_error(self, config):
         backend = PluginBackend(config, tabs_provider=list)
         result = backend.execute("print(1)")

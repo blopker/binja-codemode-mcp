@@ -21,6 +21,12 @@ abandoned and its changes are reverted when it eventually finishes. Until then n
 script can run. Keep batches small enough to finish, and prefer several focused calls over
 one sweeping one.
 
+**Do not touch the GUI.** Your script runs on a worker thread. Qt may only be used from
+Binary Ninja's main thread, so importing `binaryninjaui` or `PySide6` and calling into a
+widget — `findChildren`, `windowTitle`, anything on `UIContext` — will crash Binary Ninja
+outright, losing unsaved analysis. There is no sandbox to stop you. Everything you need is
+on `bv`; use `h` for the few session-level things, and leave the interface alone.
+
 **Each `execute` call is independent.** Nothing carries over: no variables, no imports, no
 open handles. Re-derive what you need, or keep intermediate results in your own notes.
 

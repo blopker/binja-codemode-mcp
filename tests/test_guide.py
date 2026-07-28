@@ -131,6 +131,14 @@ class TestGuideContent:
         assert "30-second limit" in text
         assert "reverted when it eventually finishes" in text
 
+    def test_warns_against_touching_qt(self):
+        """Scripts run on a worker thread; Qt from off the main thread
+        segfaults Binary Ninja, and nothing stops the model trying."""
+        text = GUIDE_PATH.read_text()
+        assert "Do not touch the GUI" in text
+        assert "worker thread" in text
+        assert "binaryninjaui" in text
+
     def test_tells_the_model_the_filesystem_is_available(self):
         """Without this the model assumes a sandbox and works around it, which
         is both slower and more token-expensive than just reading the file."""

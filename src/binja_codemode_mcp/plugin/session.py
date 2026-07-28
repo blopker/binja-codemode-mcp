@@ -75,6 +75,21 @@ class BinarySession:
         self._pin(tabs[0])
         return tabs[0]
 
+    def repin(self) -> BinaryTab | None:
+        """Drop the current pin and take the first open binary, if any.
+
+        Used when the pinned binary was closed: retargeting silently would be
+        wrong mid-analysis, but leaving the session permanently unusable is
+        worse, so the caller reports what happened.
+        """
+        self._pinned = None
+        self._pinned_name = None
+        tabs = self.tabs()
+        if not tabs:
+            return None
+        self._pin(tabs[0])
+        return tabs[0]
+
     def select(self, key: int | str) -> BinaryTab:
         """Pin a binary by tab index or by (partial) name."""
         tabs = self.tabs()

@@ -67,7 +67,21 @@ class PluginBackend:
         try:
             tab = self.session.current()
         except LookupError as e:
-            return ExecutionResult(success=False, output="", error=str(e))
+            # The pinned binary was closed. Re-pin so the session is usable
+            # again rather than dead: the script never runs when current()
+            # raises, so telling the model to call h.select() would be advice
+            # it cannot act on.
+            tab = self.session.repin()
+            if tab is None:
+                return ExecutionResult(success=False, output="", error=str(e))
+            return ExecutionResult(
+                success=False,
+                output="",
+                error=(
+                    f"{e} Selected [{tab.index}] {tab.name} instead — "
+                    "re-run your script, or call h.select() to choose another."
+                ),
+            )
 
         result = self.executor.execute(
             code,
