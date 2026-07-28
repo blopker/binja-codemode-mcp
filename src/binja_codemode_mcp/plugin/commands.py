@@ -8,7 +8,7 @@ from ..config import Config
 from .backend import PluginBackend, render_status_report
 from .mcp import MCPHandler
 from .server import MCPHTTPServer
-from .uicontext import list_tabs, refresh_views
+from .uicontext import list_tabs
 from .widget import update_status
 
 
@@ -40,7 +40,6 @@ class BinjaCodeModeMCP:
                 config,
                 tabs_provider=list_tabs,
                 bn_module=binaryninja,
-                on_mutation=refresh_views,
             )
             server = MCPHTTPServer(
                 MCPHandler(backend),

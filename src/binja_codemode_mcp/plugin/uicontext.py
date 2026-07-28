@@ -105,20 +105,3 @@ def list_tabs() -> list[BinaryTab]:
 
     execute_on_main_thread_and_wait(gather)
     return result[0] if result else []
-
-
-def refresh_views() -> None:
-    """Nudge the UI after a script mutated the database.
-
-    Undo-registered changes normally propagate on their own; this is belt and
-    braces so a batch of renames is visible without the user clicking away and
-    back. Best effort — never let a missing UI method break an execute call.
-    """
-
-    def refresh() -> None:
-        for ctx in UIContext.allContexts():
-            with contextlib.suppress(Exception):
-                ctx.refreshCurrentViewContents()
-
-    with contextlib.suppress(Exception):
-        execute_on_main_thread_and_wait(refresh)
