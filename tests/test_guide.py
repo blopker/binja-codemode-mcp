@@ -143,6 +143,27 @@ class TestGuideContent:
         ):
             assert idiom in text, idiom
 
+    def test_covers_working_across_two_databases(self):
+        """The task the tool is uniquely suited to — two binaries open at
+        once — had no section at all until a real port needed one."""
+        text = GUIDE_PATH.read_text()
+        assert "## Working across two databases" in text
+        assert 'define_user_type("config_t", tobj)' in text
+
+    def test_documents_how_to_tell_user_work_from_auto_analysis(self):
+        """Guessing from naming conventions over-reports badly, and writing
+        auto-generated names in as annotations is the failure the guide's
+        first rule warns about."""
+        text = GUIDE_PATH.read_text()
+        assert "is_var_user_defined" in text
+        assert "user_type_container" in text
+        assert "auto_discovered" in text
+
+    def test_warns_that_rendered_il_is_not_a_semantic_diff(self):
+        text = GUIDE_PATH.read_text()
+        assert "MLIL_STORE" in text
+        assert "address_comments" in text
+
     def test_warns_against_touching_qt(self):
         """Scripts run on a worker thread; Qt from off the main thread
         segfaults Binary Ninja, and nothing stops the model trying."""

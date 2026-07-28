@@ -184,6 +184,15 @@ class MCPHandler:
                 parts.append(f"\nError: {result.error}")
             if not parts:
                 parts.append("(no output — the script printed nothing)")
+            # A footer, never mixed into the script's own output: batch sizing
+            # against the timeout is guesswork without a throughput signal.
+            budget = getattr(result, "timeout_s", None)
+            elapsed = getattr(result, "elapsed_s", 0.0) or 0.0
+            parts.append(
+                f"\n\n[{elapsed:.1f}s of {budget:.0f}s]"
+                if budget
+                else f"\n\n[{elapsed:.1f}s]"
+            )
             return {
                 "content": [{"type": "text", "text": "".join(parts)}],
                 "isError": not result.success,

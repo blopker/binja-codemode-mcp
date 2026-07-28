@@ -16,6 +16,9 @@ it made is reverted — a failed batch leaves no partial state. On success the w
 becomes a single undo step. You do not need checkpoints, and you should not build your own
 rollback.
 
+Each result ends with a `[1.4s of 30s]` footer, after your output. Use it to size the
+next batch: it is the only signal you get about throughput on this binary.
+
 **There is a 30-second limit.** A script that exceeds it cannot be interrupted, so it is
 abandoned and its changes are reverted when it eventually finishes. Until then no other
 script can run. Keep batches small enough to finish, and prefer several focused calls over
@@ -82,6 +85,68 @@ for f in candidates[:5]:
     print(hex(f.start), f.name)
 ```
 
+## Working across two databases
+
+Two binaries open at once is the setup for porting annotations, diffing builds, or
+carrying a type library forward. `h.select()` rebinds `bv` immediately, which makes this
+the whole pattern: read into locals from one, select, write to the other.
+
+```python
+h.select(1)                                   # source
+src = {f.start: (f.name, f.type) for f in bv.functions}
+
+h.select(0)                                   # destination
+for addr, (name, tobj) in src.items():
+    f = bv.get_function_at(addr)
+    if f:
+        f.type = tobj                         # prototype, parameters, convention
+        f.name = name                         # the type assignment does not set this
+```
+
+**Core objects move between views directly.** A `Type` or `Variable` read from one
+BinaryView can be applied to another with no serialisation:
+
+```python
+h.select(1); tobj = bv.get_type_by_name("config_t")
+h.select(0); bv.define_user_type("config_t", tobj)
+```
+
+Widths, parameter names, struct-pointer parameters, and calling conventions all survive.
+Do **not** round-trip through C source with `parse_types_from_string` — it is far slower,
+needs dependency ordering, and drops calling conventions and confidence levels.
+
+**Stage intermediate results in a file.** Calls do not share state, so a multi-batch port
+otherwise re-reads the source side once per batch. Collect once, write JSON next to the
+binary, and read it back per batch:
+
+```python
+import json, pathlib
+scratch = pathlib.Path(bv.file.filename).with_suffix(".port.json")
+scratch.write_text(json.dumps(collected))     # first call
+collected = json.loads(scratch.read_text())   # every call after
+```
+
+Type and Variable objects cannot be serialised this way — keep those in the
+select-read-select-write shape above, and use the file for plain data like names,
+addresses, and comment text.
+
+## User annotations vs auto-analysis
+
+"Which of this is human work?" is the central question in any port, diff, or summary, and
+the answer uses a different predicate per object kind. Guessing from naming conventions
+does not work — it over-reports badly, and writing auto-generated names into a database as
+if they were annotations is exactly the wrong-name-is-worse-than-no-name failure.
+
+| Object | Is it user work? |
+|---|---|
+| Symbol | `sym.auto` is `False` |
+| Data variable | `var.auto_discovered` is `False` |
+| Function variable | `func.is_var_user_defined(var)` |
+| Type | present in `bv.user_type_container.types` |
+
+`user_type_container.types` is a mapping of *type id* to `(QualifiedName, Type)` — keyed
+by an opaque id, not by name, so match on the name inside the tuple.
+
 ## Reading the binary
 
 Raw bytes alone are not enough to correct analysis. Look at the bytes, the symbol, the
@@ -108,6 +173,15 @@ The four address lookups differ in ways that matter:
 - `get_data_var_at(addr)` — may return the variable *containing* an interior address.
 - `get_function_at(addr)` — requires a function start.
 - `get_functions_containing(addr)` — finds the function when the address is in its body.
+
+Three that reliably cost a round trip:
+
+- `len(bv)` raises. Use `bv.start` and `bv.end` for the address range.
+- `Type.enumeration` is a static constructor, not a property. To read an enum's members
+  it is `t.members`; `t.enumeration.members` fails with `'function' object has no
+  attribute 'members'`.
+- `Segment` has no `.flags`. What you want after a raw-file diff is `seg.data_offset` and
+  `seg.data_length`, which map file offsets to virtual addresses.
 
 A compact hexdump:
 
@@ -295,9 +369,38 @@ print(func.name, func.type)
 print(str(func.hlil)[:2000])
 ```
 
+When you already hold a `Type` object — porting from another view, or reusing one you
+built — there is no signature string to assign, so do both explicitly:
+
+```python
+f.type = tobj      # prototype, parameter names, calling convention
+f.name = name      # the type assignment does not set the name
+```
+
 `update_analysis_and_wait()` matters: querying a function immediately after changing its
 type otherwise shows stale analysis. Verify the prototype and the decompilation after
 every signature change.
+
+## Diffing two builds
+
+Two analysis behaviours manufacture differences that are not in the bytes.
+
+**Rendered IL is not a semantic diff.** Binary Ninja folds runs of consecutive constant
+stores into `__builtin_memcpy`, and which run it folds depends on register allocation —
+so two builds of the same source can fold at different addresses and read as a dozen
+differing stores at MLIL and HLIL while the underlying bytes are identical. Compare
+operations, not text:
+
+```python
+for il in f.mlil.instructions:
+    if il.operation == bn.MediumLevelILOperation.MLIL_STORE:
+        print(hex(il.address), il.dest.value, il.src.value)
+```
+
+**`bv.address_comments` includes platform-imported comments.** A freshly loaded firmware
+database can report thousands before anyone has written one — SVD peripheral register
+descriptions and similar. Counting them to judge how annotated a database is overstates it
+by an order of magnitude; filter by address range first.
 
 ## Cleaning up false functions
 

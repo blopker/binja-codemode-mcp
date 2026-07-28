@@ -84,8 +84,21 @@ class TestTools:
             handler, "tools/call", name="execute", arguments={"code": "print(1)"}
         )["result"]
         assert backend.executed == ["print(1)"]
-        assert result["content"][0]["text"] == "ok\n"
+        assert result["content"][0]["text"].startswith("ok\n")
         assert result["isError"] is False
+
+    def test_a_timing_footer_follows_the_output(self, handler):
+        """Sizing a batch against the timeout is guesswork without a
+        throughput signal — but it must not contaminate what the script
+        printed, which the model parses."""
+        handler.backend.result = ExecutionResult(
+            success=True, output="line one\n", elapsed_s=2.5, timeout_s=30.0
+        )
+        text = call(handler, "tools/call", name="execute", arguments={"code": "x"})[
+            "result"
+        ]["content"][0]["text"]
+        assert text.startswith("line one\n")
+        assert text.rstrip().endswith("[2.5s of 30s]")
 
     def test_execute_reports_failure_as_a_tool_error(self, handler):
         handler.backend.result = ExecutionResult(

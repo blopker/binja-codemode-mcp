@@ -77,7 +77,7 @@ def test_full_session(client, bv):
         name="execute",
         arguments={"code": "print(hex(bv.start), len(bv.functions))"},
     )
-    assert text_of(read).strip() == "0x100000000 3"
+    assert text_of(read).startswith("0x100000000 3")
 
     write = client(
         "tools/call",

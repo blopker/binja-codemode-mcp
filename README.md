@@ -37,6 +37,10 @@ claude mcp add --transport http binja http://127.0.0.1:42069/mcp \
   --header "Authorization: Bearer binja-codemode-local"
 ```
 
+If `claude mcp list` shows the server connected but `execute` and `binja_guide` do not
+appear in the tool list, reconnect the client. A reachable endpoint is not the same as
+registered tools, and the symptom looks like a broken server.
+
 Then just ask:
 
 - "Decompile main and tell me what the argument parsing does."

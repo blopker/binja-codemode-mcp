@@ -17,6 +17,8 @@ class ExecutionResult:
     output: str
     error: str | None = None
     timed_out: bool = False
+    elapsed_s: float = 0.0
+    timeout_s: float = 0.0
 
 
 class _Budget:
@@ -127,7 +129,8 @@ class CodeExecutor:
                 ),
             )
 
-        self._started_at = time.time()
+        started = time.time()
+        self._started_at = started
         self._idle.clear()
         budget = _Budget(self.max_output_bytes)
 
@@ -207,6 +210,7 @@ class CodeExecutor:
             return ExecutionResult(
                 success=False,
                 output=budget.value(),
+                elapsed_s=elapsed,
                 error=(
                     f"Execution timed out after {elapsed:.1f}s (limit "
                     f"{self.timeout}s) and was discarded: the script cannot be "
@@ -218,9 +222,18 @@ class CodeExecutor:
             )
 
         output = budget.value()
+        elapsed = time.time() - started
         if state["error"]:
-            return ExecutionResult(success=False, output=output, error=state["error"])
-        return ExecutionResult(success=True, output=output)
+            return ExecutionResult(
+                success=False,
+                output=output,
+                error=state["error"],
+                elapsed_s=elapsed,
+                timeout_s=self.timeout,
+            )
+        return ExecutionResult(
+            success=True, output=output, elapsed_s=elapsed, timeout_s=self.timeout
+        )
 
     def wait_for_idle(self, timeout: float | None = None) -> bool:
         """Block until no script is running. For tests and orderly shutdown."""
