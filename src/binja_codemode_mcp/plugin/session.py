@@ -73,6 +73,21 @@ def analysed_view(bv: Any) -> Any:
     return bv
 
 
+def _is_alive(bv: Any) -> bool:
+    """Whether a view still has a live handle.
+
+    Closing the underlying file disposes the view but leaves its tab open, so
+    Binary Ninja keeps listing a binary whose every attribute raises. Reads that
+    go through `.handle` are what notice — `bv.file.filename` still answers,
+    which is why the tab looks fine.
+    """
+    try:
+        _ = bv.view_type  # any read through `.handle` is enough
+    except Exception:
+        return False
+    return True
+
+
 class BinarySession:
     """Resolves a target name to one open binary."""
 
@@ -132,6 +147,14 @@ class BinarySession:
 
     def _analysed(self, tab: BinaryTab) -> BinaryTab:
         view = analysed_view(tab.bv)
+        if not _is_alive(view):
+            raise BinaryNotFoundError(
+                f'The view for "{tab.name}" has been disposed: something closed '
+                "the underlying file while its tab stayed open, most likely a "
+                "script using the view as a context manager — `with bv:` calls "
+                "BinaryView.__exit__, which closes the file. Nothing can reach "
+                "it now. Close that tab in Binary Ninja and reopen it."
+            )
         if view is tab.bv:
             return tab
         return BinaryTab(index=tab.index, name=tab.name, path=tab.path, bv=view)

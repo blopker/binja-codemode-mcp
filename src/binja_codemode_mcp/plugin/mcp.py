@@ -53,8 +53,9 @@ Globals: `bv` (the real BinaryView named by `target`), `bn` (binaryninja module)
 imports work.
 
 `target` names the ONE binary this call may write to; omit it only when a single
-binary is open. To read from a second, `h.read_only_view("other")` — writing through
-that is detected, rolled back, and fails the call.
+binary is open. To read from a second, `h.read_only_view("other")` — a write through
+that is rolled back and fails the call, but only at the end: the assignment itself
+succeeds, so do not test a write to decide anything.
 
 `print()` is the return channel: verbatim, capped at 32 KB; a traceback comes back
 trimmed to its last 4 KB. Print addresses as hex. Do NOT iterate every function and

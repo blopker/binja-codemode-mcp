@@ -577,6 +577,9 @@ class TestLibrary:
         assert "import json" in dump
         assert "LIMIT = 7" in dump
         assert "def summarise():" in dump
+        # Imports first: a constant sitting above the import it belongs with is
+        # valid Python that reads as though the two were unrelated.
+        assert dump.index("import json") < dump.index("LIMIT = 7")
 
     def test_lib_sources_names_what_it_cannot_write_back(self, backend):
         """Silently omitting it would produce a dump that looks complete and

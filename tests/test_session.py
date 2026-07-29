@@ -117,3 +117,43 @@ class TestDescribe:
 
     def test_nothing_open_is_an_empty_list(self):
         assert BinarySession(list).describe() == []
+
+
+class TestDisposedView:
+    """Closing a view's file disposes it but leaves the tab open, so Binary
+    Ninja keeps listing a binary that raises on every access. Confirmed live:
+    `with bv as v: pass` in the console left the tab visible and the view dead
+    for the rest of the session."""
+
+    class _Disposed:
+        """Reads through `.handle` raise; `.file` still answers.
+
+        That asymmetry is what makes the tab look healthy — `h.binaries()`
+        reported the name and path of a view that raised on everything else.
+        """
+
+        def __init__(self, name: str) -> None:
+            self.file = type("F", (), {"filename": f"/bin/{name}"})()
+
+        @property
+        def view_type(self):
+            raise ReferenceError("BinaryView has been disposed")
+
+    def _dead(self):
+        return self._Disposed("ls-a")
+
+    def test_a_disposed_view_is_refused_with_the_cause_and_the_cure(self):
+        tabs = [BinaryTab(index=0, name="ls-a", path="/bin/ls-a", bv=self._dead())]
+        with pytest.raises(BinaryNotFoundError) as e:
+            BinarySession(lambda: tabs).resolve("ls-a")
+        message = str(e.value)
+        assert "disposed" in message
+        assert "with bv" in message, "the cause is worth naming; it is not obvious"
+        assert "reopen" in message, "and it is only recoverable by hand"
+
+    def test_it_is_refused_when_it_is_the_only_binary_too(self):
+        """The single-binary path skips the name match, so it needs the same
+        check — otherwise the common case is the one that fails obscurely."""
+        tabs = [BinaryTab(index=0, name="ls-a", path="/bin/ls-a", bv=self._dead())]
+        with pytest.raises(BinaryNotFoundError):
+            BinarySession(lambda: tabs).resolve()

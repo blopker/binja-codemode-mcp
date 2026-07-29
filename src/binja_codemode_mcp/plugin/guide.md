@@ -5,56 +5,74 @@ make changes that are actually correct.
 
 ## Ground rules
 
-**Only make changes you are confident in.** A wrong name or type is worse than no name,
-because everything downstream inherits it and the next reader trusts it. If the evidence
-is ambiguous, record the ambiguity in a comment instead of guessing at a precise type.
+**Only make changes you are confident in.** A wrong name or type is worse than no name:
+everything downstream inherits it. If the evidence is ambiguous, record the ambiguity in a
+comment instead of guessing at a precise type.
 
-**There is a 30-second limit.** A script that exceeds it cannot be interrupted: it is
-abandoned, its changes are reverted when it eventually finishes, and nothing else can run
-until then. Prefer several focused calls to one sweeping one, sized from the
-`[1.4s of 30s]` footer on each result — your only signal about throughput on this binary.
+**There is a 30-second limit.** A script that exceeds it is abandoned, its changes are
+reverted when it eventually finishes, and nothing else can run until then. Prefer several
+focused calls to one sweeping one, sized from the `[1.4s of 30s]` footer on each result —
+your only signal about throughput on this binary.
 
 **Each call runs in one undo transaction on its `target`.** If your script raises, every
 change it made is reverted, so you need no checkpoints and should not build your own
 rollback.
 
-**Do not let the user edit while a script runs.** A revert rewinds the database to where
-the transaction opened, so anything they change in the GUI during your call is rolled back
-too if you fail. The status indicator tells them; keep calls short and they will not
-overlap.
+**Overlapping calls queue.** A second call waits a few seconds for the first, so two quick
+calls issued together both succeed.
 
-**Do not touch the GUI.** Your script runs on a worker thread. Qt may only be used from
-Binary Ninja's main thread, so importing `binaryninjaui` or `PySide6` and calling into a
-widget — `findChildren`, `windowTitle`, anything on `UIContext` — crashes Binary Ninja
-outright, losing unsaved analysis. Nothing stops you. Everything you need is on `bv`.
+**Do not let the user edit while a script runs.** A revert rewinds the database to where
+the transaction opened, so anything they changed in the GUI during your call is rolled
+back too if you fail. Keep calls short.
+
+**Never use a view you were handed as a context manager.** `BinaryView.__exit__` calls
+`self.file.close()`, which disposes the view — and it does not look like damage: the tab
+stays open, `h.binaries()` still lists it, and every access raises `ReferenceError` for
+the rest of the session. No script can undo it. Read from `bv` and `h.read_only_view()`
+directly, with no `with`.
+
+`binaryninja.load(path)` is the right way to reach a binary that is not open in a tab —
+that one you own, so `with` is correct:
+
+```python
+from binaryninja import load
+
+with load("/path/to/other.bin") as other:      # yours: closed on exit
+    print(len(other.functions))
+```
+
+**Do not touch the GUI.** Your script runs on a worker thread, and Qt may only be used
+from Binary Ninja's main thread: importing `binaryninjaui` or `PySide6` and calling into a
+widget crashes Binary Ninja outright, losing unsaved analysis. Nothing stops you.
+Everything you need is on `bv`.
 
 **Nothing carries over between calls** — no variables, no imports, no open handles —
 except functions you save in `h.lib`. `print()` is the return channel, verbatim and
 capped at 32 KB, so filter rather than dump; a failing script returns the tail of its
-traceback, trimmed to 4 KB.
-Print addresses as hex — the API returns ints while the disassembly shows hex, and
-mixing them loses your place.
+traceback, trimmed to 4 KB. Print addresses as hex: the API returns ints while the
+disassembly shows hex, and mixing them loses your place.
 
 ## Environment
 
 `bv` is the `BinaryView` your call's `target` names — the real thing, not a wrapper — and
 `bn` is the `binaryninja` module. **`bv` is the only view you can write to.** With one
-binary open you can leave `target` out; with more than one it is required, because a call
-that guessed could put a write in a database you did not choose. Everything on `bv` works, and so does ordinary Python. A few
-helpers cover what the Binary Ninja API does not:
+binary open you can leave `target` out; with more than one it is required. Everything on
+`bv` works, and so does ordinary Python. A few helpers cover what the Binary Ninja API
+does not:
 
-- `h.binaries()` — list open binaries and the names a `target` can use. A target matches
-  on any part of the name or path, so `target="fw-1.3"` keeps working after Binary Ninja
-  renames the tab to `fw-1.3.bndb` on save. An ambiguous match is refused, not guessed.
-- `h.read_only_view(name)` — another open binary, to read from. Writing through it is
+- `h.binaries()` — the open binaries and the names a `target` can use. A target matches on
+  any part of the name or path, so `target="fw-1.3"` still reaches the tab Binary Ninja
+  shows as `fw-1.3.arm64e`, and as `fw-1.3.arm64e.bndb` once saved. An ambiguous match is
+  refused, not guessed.
+- `h.read_only_view(name)` — another open binary, to read from. A write through it is
   detected, rolled back, and fails the call.
 - `h.lib` — functions saved for later calls, and `h.lib_sources()` to dump them with the
   imports and constants each one carries.
 
 **You have the filesystem.** There is no sandbox: `open()`, `pathlib`, `struct`,
 `hashlib`, `subprocess` all work. Reading the file on disk alongside the analysis is often
-the shortest path to an answer — diffing two builds byte for byte, checking a region the
-analysis has not typed, or loading a symbol list or SDK header from the project directory.
+the shortest path — diffing two builds byte for byte, checking a region the analysis has
+not typed, loading an SDK header from the project directory.
 
 ```python
 raw = bv.file.original_filename   # the binary; bv.file.filename is the .bndb
@@ -63,9 +81,9 @@ with open(raw, "rb") as f:
 print(len(image), image[:16].hex())
 ```
 
-Prefer `bv.read()` for anything mapped, since it resolves virtual addresses and reflects
-the analysis; use the file directly when you need bytes the view does not cover, or when
-you need a second binary that is not open in Binary Ninja.
+Prefer `bv.read()` for anything mapped: it resolves virtual addresses and reflects the
+analysis. Use the file directly when you need bytes the view does not cover, or a second
+binary that is not open in Binary Ninja.
 
 Two ways the file on disk disagrees with the view, both silent — no error, just bytes
 that are wrong in a plausible way:
@@ -88,7 +106,7 @@ that are wrong in a plausible way:
   pointers finds none of them, which looks exactly like "there is no table here".
 
 **Do not iterate every function and decompile it.** On a few thousand functions that is
-minutes of analysis and far more output than fits. Filter to a handful first, then look
+minutes of analysis and more output than fits. Filter to a handful first, then look
 closely:
 
 ```python
@@ -101,8 +119,8 @@ for f in candidates[:5]:
 ## A per-session library
 
 `h.lib` holds functions for the rest of the session. Save anything you will run more than
-once — a filter, a check, a port step — and call it from later scripts instead of
-re-emitting the code and getting it subtly different each time.
+once — a filter, a check, a port step — instead of re-emitting the code and getting it
+subtly different each time.
 
 ```python
 def unported(src):
@@ -129,45 +147,43 @@ h.lib_sources()           # every definition, to carry into a new session
 del h.lib.unported        # or del h.lib["unported"]
 ```
 
-It stores **functions, never results**, so there is no stale value to reason about: a
-saved function re-derives against the live database on every call, and gets that call's
-`bv`, `h` and `print`. The footer on every result lists what is saved.
+It stores **functions, never results**: a saved function re-derives against the live
+database on every call, and gets that call's `bv`, `h` and `print`. The footer on every
+result lists what is saved.
 
-Three things it will not accept, each because rebinding would break it:
+Three things it will not accept:
 
-- a function that closes over a value from the call that defined it — that value would be
-  frozen inside it. Take it as a parameter.
-- a function from anywhere but your script; an imported one needs its own module's globals.
+- a function that closes over a value from the call that defined it — take it as a
+  parameter instead.
+- a function from anywhere but your script; an imported one needs its own module's
+  globals.
 - anything that is not a function.
 
 Top-level names the function uses come along with it, so an `import json` or a
 `THRESHOLD = 10` above the `def` still works when it is called three scripts later. Only
 `bv`, `bn`, `h` and `print` are refreshed per call, and nothing the *calling* script
-happens to define can reach inside a saved function. That carrying is also the one way a
-stale value can get in: keep it to imports and constants, and take anything read out of
-the database as a parameter.
+defines can reach inside a saved function. That carrying is also the one way a stale value
+gets in: keep it to imports and constants, and take anything read out of the database as a
+parameter.
 
 Saved functions reach each other — and recurse — through `h.lib`, never by bare name:
 `h.lib.base()`, not `base()`. Key an entry the same as its `def` unless you mean to
 rename it.
 
-A failed script keeps its definitions: the undo transaction reverts the database, not the
-library, so you can fix the caller without re-sending the function. So does closing a
-binary — the library belongs to the server session, so saved functions survive a save,
-close and reopen and re-run against the reopened database.
+A failed script keeps its definitions, and so does closing a binary: the library belongs
+to the server session, so you can fix a caller without re-sending the function, and saved
+functions survive a save, close and reopen.
 
-A rule of thumb, because the mistake is not using it at all: **the second time you are
-about to send the same loop, save it instead.** Read-back loops over a fixed set of
-addresses are the usual case.
-
-This saves re-emitting code, not recomputation — `h.lib.collect()` still walks every
-function each time you call it.
+**The second time you are about to send the same loop, save it instead.** This saves
+re-emitting code, not recomputation — `h.lib.collect()` still walks every function each
+time you call it.
 
 ## Working across two databases
 
 Porting annotations, diffing builds, or carrying a type library forward is one pattern:
 name the **destination** as the call's `target`, read the source through
-`h.read_only_view`, write to `bv`.
+`h.read_only_view`, write to `bv`. `bv` is the one view in a transaction, so a failure
+rolls the destination back cleanly and a stray write to the source is undone.
 
 ```python
 # target="firmware-1.3"
@@ -180,15 +196,11 @@ for f in bv.functions:                        # the destination, in a transactio
         f.name = match.name                   # the type assignment does not set this
 ```
 
-The asymmetry is the safety: `bv` is the one view in a transaction, so a failure rolls the
-destination back cleanly, and a stray write to the source is detected and undone rather
-than left behind.
-
 **Addresses only match when the builds match.** `get_function_at(f.start)` is right for a
 recompile of the same source and wrong for a real update, where code has moved. Match on
 something stable — identical body bytes, an imported-symbol anchor, a string reference —
 and port in tiers: everything for an exact match, name and prototype only for a changed
-body, nothing at all for a guess. A wrong name is worse than no name.
+body, nothing at all for a guess.
 
 **Core objects move between views directly.** A `Type` or `Variable` read from one
 BinaryView applies to another with no serialisation:
@@ -198,16 +210,15 @@ tobj = src.get_type_by_name("config_t")
 bv.define_user_type("config_t", tobj)
 ```
 
-This is why both views live in one call: a `Type` cannot survive to the next one — it is
-not serialisable and `h.lib` stores functions, not values.
+Both views have to be live in the same call for this: a `Type` cannot survive to the next
+one — it is not serialisable, and `h.lib` stores functions, not values.
 
 Widths, parameter names, struct-pointer parameters, and calling conventions all survive.
 Do **not** round-trip through C source with `parse_types_from_string` — it is far slower,
 needs dependency ordering, and drops calling conventions and confidence levels.
 
 **Stage intermediate results in a file.** Calls do not share state, so a multi-batch port
-otherwise re-reads the source side once per batch. Collect once, write JSON next to the
-binary, and read it back per batch:
+otherwise re-reads the source side once per batch:
 
 ```python
 import json, pathlib
@@ -224,27 +235,30 @@ addresses, and comment text.
 
 "Which of this is human work?" is the central question in any port, diff, or summary, and
 the answer uses a different predicate per object kind. Guessing from naming conventions
-does not work — it over-reports badly, and writing auto-generated names into a database as
-if they were annotations is exactly the wrong-name-is-worse-than-no-name failure.
+over-reports badly.
 
 | Object | Is it user work? |
 |---|---|
 | Symbol | `sym.auto` is `False`, over `bv.get_symbols()` |
 | Data variable | `var.auto_discovered` is `False` |
-| Function variable | `func.is_var_user_defined(var)` — but see the warning below |
+| Function variable | `func.is_var_user_defined(var)` over `func.vars` — but see below |
 | Type | present in `bv.user_type_container.types` |
 
 `user_type_container.types` is a mapping of *type id* to `(QualifiedName, Type)` — keyed
 by an opaque id, not by name, so match on the name inside the tuple.
+
+Iterate `func.vars`, not `func.parameter_vars`: the first is every variable the function
+has (48 on a small one), the second only its arguments (2). A count over the wrong one
+looks plausible and means something else.
 
 **`is_var_user_defined` lies about any function that has been through
 `remove_user_function` and then `bv.undo()`.** The function comes back with two `void*`
 register arguments flagged user-defined, and `update_analysis_and_wait()` does not fix it.
 A save and reload restores the real variable list, but the false flags persist into the
 `.bndb`. Measured: a database whose only human edits were five renames reported exactly two
-user-defined variables, both planted this way. Port on that predicate and you carry two
-invented argument types across as if they were annotations. If a function has been through
-that cycle, do not trust the predicate on it.
+user-defined variables, both planted this way — port on that predicate and you carry two
+invented argument types across. Do not trust it on a function that has been through that
+cycle.
 
 ## Reading the binary
 
@@ -273,15 +287,9 @@ The four address lookups differ in ways that matter:
 - `get_function_at(addr)` — requires a function start.
 - `get_functions_containing(addr)` — finds the function when the address is in its body.
 
-Three that reliably cost a round trip:
-
-- `len(bv)` raises. Use `bv.start` and `bv.end` for the address range.
-- `Type.enumeration` is a static constructor, not a property. To read an enum's members
-  it is `t.members`; `t.enumeration.members` fails with `'function' object has no
-  attribute 'members'`.
-- `Segment` has no `.flags`. What you want after a raw-file diff is `seg.data_offset` and
-  `seg.data_length`, which map file offsets to virtual addresses — within the slice, so
-  see the fat-binary caveat under *Environment* before indexing a file with them.
+`Segment` has no `.flags`. What you want after a raw-file diff is `seg.data_offset` and
+`seg.data_length`, which map file offsets to virtual addresses — within the slice, so see
+the fat-binary caveat under *Environment* before indexing a file with them.
 
 ## Strings, sections, and references
 
@@ -304,7 +312,8 @@ you need those. Read any setting back with
 
 `bv.sections` is a mapping, not a list: iterate `bv.sections.values()` for `.name`,
 `.start`, `.end`. So is `bv.data_vars`, keyed by address — which the user-vs-auto table
-sends you straight at.
+sends you straight at. `bv.segments` is **not**: it is a plain list, so iterate it
+directly.
 
 Follow **data** references as well as code ones. A pointer table is referenced by data
 refs, so looking only at `get_code_refs` can miss the consumer entirely:
@@ -320,14 +329,14 @@ write.
 ## Recovering data formats
 
 When a blob looks like strings, a table, or an image, read the code that *consumes* it
-before assigning a type. The consumer reveals record stride, index arithmetic, field
-offsets, explicit lengths versus null termination, and signedness — none of which are
+before assigning a type: the consumer reveals record stride, index arithmetic, field
+offsets, explicit lengths versus null termination, and signedness, none of which are
 visible in the bytes alone.
 
 ```python
 func = bv.get_function_at(0x34DCC)
 print(func.name)
-print(str(func.hlil))
+print(str(func.hlil))          # the whole body — only for a small function
 ```
 
 `str(func.hlil)` on a real function is often ten thousand characters, which blows the
@@ -350,14 +359,14 @@ disassembly addresses in the first place.
 
 **Use the window, not `il.address == addr`.** HLIL folds runs of machine instructions
 onto a subset of addresses: roughly 60% of disassembly addresses have no HLIL
-instruction of their own (61% and 63% on two 133-function Mach-O binaries). An address taken from disassembly, a cross-reference,
-or a string reference usually matches nothing, and an exact-match loop that finds nothing
-reads as "there is no code here" rather than "wrong query". Narrow to `==` only once the
-window has shown you an address HLIL actually renders at.
+instruction of their own (61% and 63% on two 133-function Mach-O binaries). An address
+taken from disassembly, a cross-reference, or a string reference usually matches nothing,
+and the empty result reads as "there is no code here" rather than "wrong query". Narrow to
+`==` only once the window has shown you an address HLIL actually renders at.
 
-After applying a type, print the HLIL again. Named fields and array indexing appearing in
-the output is good evidence that the type matches the access pattern; if the decompiler
-still shows raw offset arithmetic, the type is probably wrong.
+After applying a type, print the HLIL again. Named fields and array indexing are good
+evidence that the type matches the access pattern; if the decompiler still shows raw
+offset arithmetic, the type is probably wrong.
 
 ## Types
 
@@ -392,9 +401,9 @@ for name, type_object in result.types.items():
 ```
 
 If the project ships SDK or vendor headers, search them before inventing an approximate
-type. Copy the exact definition and define its dependencies in order. Preprocessor-heavy
-headers work better reduced to the minimal declarations you need than imported wholesale.
-Applying an accurate type usually improves every caller too, so re-read their HLIL
+type. Copy the exact definition and define its dependencies in order; reduce a
+preprocessor-heavy header to the minimal declarations you need rather than importing it
+wholesale. An accurate type usually improves every caller too, so re-read their HLIL
 afterwards.
 
 ## Data variables
@@ -406,8 +415,8 @@ array_type, _ = bv.parse_type_string("record_t const[5]")
 bv.define_user_data_var(0x3AA08, array_type, "unit_records")
 ```
 
-The second value from `parse_type_string` is a `QualifiedName`, not a `str`. Passing that
-object as the `name` argument fails — pass a string.
+The second value from `parse_type_string` is a `QualifiedName`, not a `str`; passing it as
+the `name` argument fails.
 
 Verify immediately:
 
@@ -424,11 +433,9 @@ propagates out of the transaction and reverts the very definition you were check
 ### Replacing conflicting analysis
 
 Binary Ninja may have already inferred a pointer, string, or smaller variable inside the
-range you want to cover. Remove the conflicting definitions first:
-
-Auto-discovered objects and ones you created need different calls, and the user-level
-variants silently do nothing to auto-discovered ones — which are usually exactly what is
-in the way. Check `sym.auto` and undefine accordingly:
+range you want to cover. Remove those first. Auto-discovered objects and ones you created
+need different calls, and the user-level variants silently do nothing to auto-discovered
+ones — usually exactly what is in the way — so check the flag and undefine accordingly:
 
 ```python
 for addr in (0x3AA08, 0x3AA20, 0x3AA38):
@@ -459,7 +466,7 @@ and interior queries resolve to the new array.
 prototype is half-finished. Include the return type, a meaningful name and type for every
 argument, integer width and signedness, pointer versus value, and `const` where it
 applies. Do not leave `arg1` or a guessed `int32_t` when callers, callees, or an SDK
-prototype provide better evidence.
+header provide better evidence.
 
 ```python
 addr = 0x123456
@@ -481,8 +488,7 @@ When you hold a `Type` object rather than a string there is no name in it to app
 both: `f.type = tobj` then `f.name = name`.
 
 Without `update_analysis_and_wait()` a query right after a type change shows stale
-analysis. Verify the prototype and the decompilation after
-every signature change.
+analysis. Verify the prototype and the decompilation after every signature change.
 
 ## Diffing two builds
 
@@ -509,8 +515,8 @@ by an order of magnitude; filter by address range first.
 
 Data — bitmap fonts especially — can contain byte sequences that decode as plausible
 instructions, and Binary Ninja may create hundreds of false functions in such a region.
-Establish that the region is data from references and consumers *first*; never delete
-functions based on appearance alone.
+Establish that the region is data from its references and consumers *first*; never delete
+functions on appearance alone.
 
 ```python
 lo, hi = 0x397E4, 0x479F0
@@ -580,3 +586,20 @@ the stride the indexing code actually uses.
 Keep destructive work (deleting functions, undefining variables) in a separate `execute`
 call from the definitions that follow it. Both calls are individually atomic, and the
 split makes a failure much easier to understand.
+
+## Troubleshooting
+
+| What you get back | What to do |
+|---|---|
+| `ReferenceError: BinaryView has been disposed` | Something used that view as a context manager. No script can reach it again; the tab has to be closed and reopened in the GUI. |
+| `target` is required, with several binaries open | Name one of the binaries from `h.binaries()` as the call's `target`. |
+| `No open binary matches target 'x'` | The tab may have been renamed on save. Match on any part of the name or path — `h.binaries()` shows both. |
+| `Wrote to X, which this call opened read-only` | Make X the call's `target` instead. The write succeeded in-script and the call failed only at the end, so a script cannot verify its own write here. |
+| `A previous script is still running on X` | Brief overlaps queue and succeed; past that they are refused. Wait for it to finish. |
+| `Execution timed out after 30.0s` | The changes are reverted, unless the message says the script is still closing its transaction — then read the database back before re-running any of it. Either way, narrow the batch: filter before iterating, or split it across calls. |
+| `holds a BinaryView through default argument N` | `h.lib` refuses a pinned view, which would outlive this call's target. Take the view as a parameter. |
+| `captured a value from this call` | A closure would freeze that value. Define the function at the top level and take what it needs as a parameter. |
+| `TypeError: object of type 'BinaryView' has no len()` | Use `bv.start` and `bv.end` for the address range. |
+| `'function' object has no attribute 'members'` | `Type.enumeration` is a static constructor, not a property. Read an enum's members with `t.members`. |
+| `NameError` inside a saved `h.lib` function | Only the top-level names the body used at save time came along. Pass anything else in as a parameter; `h.lib.name.source` shows what you saved. |
+| Nothing at all from an exact-address HLIL match | Most disassembly addresses have no HLIL instruction of their own. Use the address window under *Recovering data formats*. |

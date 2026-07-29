@@ -18,7 +18,8 @@ case seems to need the interface, record it as a gap.
 Record any traceback, unexpected tool error, or disagreement between a tool and the UI as
 a failure rather than working around it. The workaround is the finding.
 
-Pass `topic` to `binja_guide` except where told otherwise — the full guide is ~9 KB a call.
+Pass `topic` to `binja_guide` except where told otherwise — the whole guide is ~27 KB,
+two thirds of a result, and one section is usually what you want.
 
 Cases leave this plan once the suite covers them and several runs have passed them, so
 what is here is what pytest cannot reach: real transactions, real undo, real analysis, tab
@@ -110,9 +111,10 @@ the message to name `ls-b`, and a third call to confirm the name did not change.
 confirm `h.read_only_view("ls-a")` while targeting `ls-a` is refused with a message
 pointing at `bv`.
 
-**C4 — a Type object crosses views.** Target `ls-a`, read a type from `ls-b` through
-`h.read_only_view`, and apply it with `bv.define_user_type`. This is the reason both views
-are live in one call rather than one per call; if it fails, say how.
+**C4 — a Type object crosses views.** A freshly-analysed Mach-O has no user types, so
+first define one in `ls-b` with `target="ls-b"`. Then target `ls-a`, read that type from
+`ls-b` through `h.read_only_view`, and apply it with `bv.define_user_type`. This is the
+reason both views are live in one call rather than one per call; if it fails, say how.
 
 ## D. Limits and failure modes
 

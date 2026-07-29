@@ -106,12 +106,26 @@ class TestGuideSize:
     — with room for the generated header. It has grown steadily."""
 
     def test_the_rendered_guide_fits_in_one_tool_result(self):
+        """With headroom, deliberately. At the hard limit the failure mode is a
+        silently truncated guide — the model gets one missing its end and has no
+        way to tell. Failing early leaves room to notice and decide."""
         from binja_codemode_mcp.plugin.mcp import MAX_RESULT_BYTES
 
-        rendered = render(FULL_STATUS)
-        assert len(rendered.encode()) < MAX_RESULT_BYTES, (
-            "guide.md has outgrown the response budget; split it into topics "
-            "or raise MAX_RESULT_BYTES deliberately"
+        rendered = len(render(FULL_STATUS).encode())
+        assert rendered < MAX_RESULT_BYTES * 0.85, (
+            f"the rendered guide is {rendered} bytes of {MAX_RESULT_BYTES}; "
+            "split a section out, trim one, or raise MAX_RESULT_BYTES deliberately"
+        )
+
+    def test_the_headroom_is_real_not_decorative(self):
+        """A margin nobody checks is a margin that gets raised the first time
+        it fails. 27 KB of 40 KB is already past two thirds."""
+        from binja_codemode_mcp.plugin.mcp import MAX_RESULT_BYTES
+
+        rendered = len(render(FULL_STATUS).encode())
+        assert rendered > MAX_RESULT_BYTES * 0.5, (
+            "the guide shrank a lot; retune the headroom rather than leaving a "
+            "bound that can no longer be reached"
         )
 
     def test_an_absurd_topic_is_not_echoed_whole(self):
@@ -228,11 +242,49 @@ class TestGuideContent:
         assert "only view you can write to" in text
         assert "h.read_only_view" in text
 
+    def test_warns_against_using_a_handed_view_as_a_context_manager(self):
+        """BinaryView.__exit__ closes the file. The batch docs teach
+        `with load(path) as bv:`, which is correct for a file you opened and
+        closes the user's tab when applied to one you were handed."""
+        text = guide_text()
+        assert "context manager" in text
+        assert "file.close()" in text
+
     def test_carries_no_project_specific_leftovers(self):
         """Guidance must generalise: no target-specific names, no dead API."""
         text = guide_text().lower()
         for leftover in ("nrf5", "softdevice", "ble_gap", "binja._bv", "binja."):
             assert leftover not in text, leftover
+
+    def test_troubleshooting_maps_the_errors_a_live_run_hit_to_a_fix(self):
+        """Every one of these was raised at a model in a real session, and each
+        has a specific answer it will not otherwise guess."""
+        text = guide_text()
+        assert "## Troubleshooting" in text
+        for message in (
+            "ReferenceError: BinaryView has been disposed",
+            "No open binary matches target",
+            "which this call opened read-only",
+            "A previous script is still running",
+            "Execution timed out",
+            "holds a BinaryView through default argument",
+            "captured a value from this call",
+            "no len()",
+            "'function' object has no attribute 'members'",
+        ):
+            assert message in text, message
+
+    def test_says_a_disposed_view_is_only_fixable_in_the_gui(self):
+        """Nothing a script does recovers it, so the model must stop trying and
+        ask for the tab to be closed and reopened."""
+        assert "closed and reopened in the GUI" in guide_text()
+
+    def test_says_a_write_to_a_read_only_view_fails_only_at_the_end(self):
+        """The assignment succeeds, so a script that tests its own write there
+        concludes the opposite of the truth."""
+        text = guide_text()
+        assert "succeeded in-script" in text
+        assert "cannot verify its own write" in text
 
     def test_tells_the_model_not_to_build_its_own_rollback(self):
         """Transactions make a rollback feature unnecessary; say so."""

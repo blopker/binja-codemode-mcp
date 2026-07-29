@@ -316,7 +316,15 @@ class _Library:
 def _render_captured(captured: dict[str, Any]) -> str:
     """Source for the top-level names a saved function carries, where possible."""
     lines: list[str] = []
-    for name, value in sorted(captured.items()):
+
+    # Imports first: a constant above the import it sits next to is valid Python
+    # and reads as though it were unrelated.
+    def _import_first(item: tuple[str, Any]) -> tuple[bool, str]:
+        name, value = item
+        return (not isinstance(value, types.ModuleType), name)
+
+    ordered = sorted(captured.items(), key=_import_first)
+    for name, value in ordered:
         if isinstance(value, types.ModuleType):
             actual = getattr(value, "__name__", name)
             lines.append(
