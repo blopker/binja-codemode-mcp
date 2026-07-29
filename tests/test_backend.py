@@ -78,6 +78,52 @@ class TestTargeting:
         assert backend.execute("bv.rename('after')").success
 
 
+class TestLogging:
+    """The log is where the user watches what is being done to their database."""
+
+    def _backend(self, config, bv):
+        lines: list[str] = []
+        tabs = [BinaryTab(0, "ls-a", "/bin/ls-a", bv)]
+        backend = PluginBackend(config, tabs_provider=lambda: tabs, log=lines.append)
+        return backend, lines
+
+    def test_a_call_announces_itself_before_running(self, config, bv):
+        """Said up front, not only on the way out: a script that never returns
+        would otherwise leave no trace of what it was doing."""
+        backend, lines = self._backend(config, bv)
+        backend.execute("bv.rename('x')", None, "rename five functions")
+        assert "running on ls-a — rename five functions" in lines[0]
+
+    def test_the_end_reports_the_verdict_and_elapsed(self, config, bv):
+        backend, lines = self._backend(config, bv)
+        backend.execute("pass")
+        assert "ok in " in lines[-1]
+
+    def test_a_failure_says_it_rolled_back(self, config, bv):
+        backend, lines = self._backend(config, bv)
+        backend.execute("bv.rename('x')\nraise ValueError('boom')")
+        assert "failed, rolled back" in lines[-1]
+
+    def test_a_refused_target_is_logged_too(self, config, bv):
+        other = type(bv)("other")
+        tabs = [
+            BinaryTab(0, "ls-a", "/bin/ls-a", bv),
+            BinaryTab(1, "ls-b", "/bin/ls-b", other),
+        ]
+        lines: list[str] = []
+        backend = PluginBackend(config, tabs_provider=lambda: tabs, log=lines.append)
+        backend.execute("pass")
+        assert any("refused" in line for line in lines)
+
+    def test_a_logger_that_raises_cannot_take_a_call_down(self, config, bv):
+        def boom(_message):
+            raise RuntimeError("log died")
+
+        tabs = [BinaryTab(0, "ls-a", "/bin/ls-a", bv)]
+        backend = PluginBackend(config, tabs_provider=lambda: tabs, log=boom)
+        assert backend.execute("print('fine')").output.strip() == "fine"
+
+
 class TestRunningScript:
     """The status indicator's only source of truth. A failed script reverts the
     database to where its transaction opened, taking any edit the user made in
@@ -149,6 +195,24 @@ class TestReadOnlyView:
         result = backend.execute('h.read_only_view("target")', "target")
         assert not result.success
         assert "this call's target" in (result.error or "")
+
+    def test_the_target_guard_matches_the_view_not_just_the_name(self, config, bv):
+        """Two tabs can carry the same display name — a build opened twice, or
+        a file reopened alongside itself. Guarding on the name alone would
+        refuse a legitimate read; guarding on the view is what the rule means."""
+        other = type(bv)("other")
+        tabs = [
+            BinaryTab(0, "shared", "/a/shared", bv),
+            BinaryTab(1, "shared", "/b/shared", other),
+        ]
+        backend = PluginBackend(config, tabs_provider=lambda: tabs)
+        # Ambiguous by name, so each has to be reached by its path.
+        result = backend.execute(
+            'src = h.read_only_view("/b/shared")\nprint(src.file.filename)',
+            "/a/shared",
+        )
+        assert result.success, result.error
+        assert result.output.strip() == "/bin/other"
 
     def test_a_clean_read_commits_silently(self, config, bv):
         """An empty commit is silent where an empty revert raises the Binary
@@ -569,6 +633,49 @@ class TestLibrary:
         )
         assert not result.success
         assert "captur" in (result.error or "").lower()
+
+    def test_a_view_held_through_a_default_is_refused(self, backend):
+        """`def f(src=bv)` is exactly what the closure refusal tells you to do
+        instead, and it pins the defining call's view just as hard — worse now,
+        since a saved function is meant to run against whatever the call
+        targets."""
+        result = backend.execute(
+            'def where(src=bv):\n    return src.file.filename\nh.lib["where"] = where'
+        )
+        assert not result.success
+        assert "BinaryView" in (result.error or "")
+        assert "default argument" in (result.error or "")
+
+    def test_a_view_held_through_a_top_level_name_is_refused(self, backend):
+        result = backend.execute(
+            "src = bv\ndef where():\n    return src.file.filename\n"
+            'h.lib["where"] = where'
+        )
+        assert not result.success
+        assert "top-level name 'src'" in (result.error or "")
+
+    def test_a_view_held_through_an_annotation_is_refused(self, backend):
+        result = backend.execute(
+            'def where(x: bv = 1):\n    return x\nh.lib["where"] = where'
+        )
+        assert not result.success
+        assert "annotation" in (result.error or "")
+
+    def test_the_refusal_says_to_take_the_view_as_a_parameter(self, backend):
+        """The message has to name the fix, or it just moves the guessing."""
+        result = backend.execute(
+            'def where(src=bv):\n    return src\nh.lib["where"] = where'
+        )
+        assert "h.read_only_view" in (result.error or "")
+
+    def test_ordinary_defaults_are_still_accepted(self, backend):
+        """The check must not cost the normal spelling."""
+        result = backend.execute(
+            "def top(limit=5, *, deep=False):\n    return (limit, deep)\n"
+            'h.lib["top"] = top\nprint(h.lib.top())'
+        )
+        assert result.success
+        assert result.output.strip() == "(5, False)"
 
     def test_a_function_from_another_module_is_refused(self, backend):
         """Rebinding it would strip the globals its own module needs."""

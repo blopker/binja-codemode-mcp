@@ -179,18 +179,97 @@ class TestKeepAlive:
         assert b'"id": 5' in second or b'"id":5' in second
 
     def test_an_oversized_body_cannot_smuggle_a_pipelined_request(self, endpoint):
-        body = b"x" * (MAX_BODY_BYTES + 10)
+        # An oversized Content-Length with only a token body: the server reacts
+        # to the header, so this is both the realistic shape and the one that
+        # does not depend on being able to finish writing 8 MB.
+        head = (
+            f"POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+            f"Authorization: Bearer {API_KEY}\r\n"
+            f"Content-Type: application/json\r\n"
+            f"Content-Length: {MAX_BODY_BYTES + 10}\r\n\r\n"
+        ).encode()
+        seen = b""
         with self._sock(endpoint) as sk:
-            sk.sendall(self._request("/mcp", body))
-            sk.sendall(b"GET /pwn HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
-            seen = b""
             try:
+                sk.sendall(head + b"x" * 100)
+                # The body was refused unread, so the connection must close
+                # rather than keep bytes that would be parsed as a new request.
+                sk.sendall(b"GET /pwn HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
                 while chunk := sk.recv(4096):
                     seen += chunk
             except (TimeoutError, OSError):
                 pass
         assert b"413" in seen
         assert b"405" not in seen, "the smuggled GET was answered"
+
+    def test_a_get_with_a_body_cannot_smuggle_a_request(self, endpoint):
+        """do_GET answered 405 without touching the body, so a POST hidden in
+        it was read as the next request and dispatched — past the method check
+        that had just refused it."""
+        smuggled = (
+            f"POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+            f"Authorization: Bearer {API_KEY}\r\n"
+            f"Content-Type: application/json\r\nContent-Length: 46\r\n\r\n"
+            '{"jsonrpc": "2.0", "id": 666, "method": "ping"}'
+        ).encode()
+        head = (
+            f"GET /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+            f"Content-Length: {len(smuggled)}\r\n\r\n"
+        ).encode()
+        seen = b""
+        with self._sock(endpoint) as sk:
+            try:
+                sk.sendall(head + smuggled)
+                sk.settimeout(0.3)  # the connection stays alive; do not wait it out
+                while chunk := sk.recv(4096):
+                    seen += chunk
+            except (TimeoutError, OSError):
+                pass
+        assert b"405" in seen
+        assert b"666" not in seen, "the smuggled POST was dispatched"
+
+    def test_a_chunked_body_cannot_smuggle_a_request(self, endpoint):
+        """Chunked is refused, and the body cannot be drained without parsing
+        chunk framing — so the connection has to close rather than leave it."""
+        smuggled = (
+            f"POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+            f"Authorization: Bearer {API_KEY}\r\n"
+            f"Content-Type: application/json\r\nContent-Length: 46\r\n\r\n"
+            '{"jsonrpc": "2.0", "id": 777, "method": "ping"}'
+        ).encode()
+        head = (
+            b"POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+            b"Transfer-Encoding: chunked\r\n\r\n"
+        )
+        seen = b""
+        with self._sock(endpoint) as sk:
+            try:
+                sk.sendall(head + smuggled)
+                while chunk := sk.recv(4096):
+                    seen += chunk
+            except (TimeoutError, OSError):
+                pass
+        assert b"777" not in seen, "the smuggled POST was dispatched"
+
+    def test_a_non_ascii_authorization_header_is_refused_not_a_crash(self, endpoint):
+        """http.server decodes headers as latin-1 and compare_digest refuses
+        non-ASCII str, so this raised TypeError: no reply at all, and a
+        traceback into Binary Ninja's log from an unauthenticated request."""
+        head = (
+            b"POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+            b"Authorization: Bearer \xc3\xa9vil\r\n"
+            b"Content-Type: application/json\r\nContent-Length: 2\r\n\r\n{}"
+        )
+        seen = b""
+        with self._sock(endpoint) as sk:
+            try:
+                sk.sendall(head)
+                sk.settimeout(0.3)
+                while chunk := sk.recv(4096):
+                    seen += chunk
+            except (TimeoutError, OSError):
+                pass
+        assert b"401" in seen, seen[:120]
 
     def test_negative_content_length_is_rejected_not_hung(self, endpoint):
         """rfile.read(-1) reads to EOF and would hang the worker forever."""

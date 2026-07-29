@@ -78,7 +78,9 @@ function prototypes, and the calls that behave surprisingly."""
 class Backend(Protocol):
     """What the protocol layer needs from the plugin."""
 
-    def execute(self, code: str, target: Any = None) -> Any: ...
+    def execute(
+        self, code: str, target: Any = None, description: Any = None
+    ) -> Any: ...
     def guide(self, topic: str | None) -> str: ...
     def status(self) -> dict[str, Any]: ...
 
@@ -105,6 +107,25 @@ class MCPHandler:
         if msg_id is None:
             return None
 
+        # Shape checks before dispatch. Without them a structured `method` or
+        # positional `params` — both legal JSON, and positional params are legal
+        # JSON-RPC — reached `.get()` and came back as an internal error with a
+        # Python exception in it, rather than as the protocol error they are.
+        if not isinstance(method, str):
+            return _error(
+                msg_id,
+                -32600,
+                f"Invalid Request: method must be a string, "
+                f"got {type(method).__name__}.",
+            )
+        if not isinstance(params, dict):
+            return _error(
+                msg_id,
+                -32602,
+                "Invalid params: expected an object, got "
+                f"{type(params).__name__}. This server takes named parameters only.",
+            )
+
         try:
             result = self._dispatch(method, params)
         except MCPError as e:
@@ -114,7 +135,7 @@ class MCPHandler:
 
         return {"jsonrpc": "2.0", "id": msg_id, "result": result}
 
-    def _dispatch(self, method: str | None, params: dict[str, Any]) -> dict[str, Any]:
+    def _dispatch(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         if method == "initialize":
             return self._initialize()
         if method == "ping":
@@ -204,7 +225,10 @@ class MCPHandler:
             target = args.get("target")
             if target is not None and not isinstance(target, str):
                 return _tool_error("`target` must be the name of an open binary.")
-            result = self.backend.execute(code, target)
+            note = args.get("description")
+            result = self.backend.execute(
+                code, target, note if isinstance(note, str) else None
+            )
 
             # Reserve the footer and the error out of the budget first, then
             # give the rest to output. The footer is concatenated after the

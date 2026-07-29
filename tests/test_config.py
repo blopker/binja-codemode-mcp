@@ -46,3 +46,25 @@ class TestPaths:
     def test_endpoint_matches_host_and_port(self, tmp_path):
         config = Config(api_key="k", data_dir=tmp_path, host="127.0.0.1", port=9)
         assert config.endpoint == "http://127.0.0.1:9/mcp"
+
+
+class TestHostileConfig:
+    """A config file the server cannot make sense of must never stop it
+    starting — the caller turns any exception here into "failed to start"."""
+
+    def test_json_that_is_not_an_object_falls_back(self, tmp_path):
+        from binja_codemode_mcp.config import DEFAULT_API_KEY, load_api_key
+
+        for content in ("[]", "null", "123", '"hello"'):
+            (tmp_path / "config.json").write_text(content)
+            assert load_api_key(tmp_path) == DEFAULT_API_KEY, content
+
+    def test_a_non_string_key_falls_back(self, tmp_path):
+        """It gets formatted into an Authorization header, so it has to be
+        a string or the header is nonsense."""
+        from binja_codemode_mcp.config import DEFAULT_API_KEY, load_api_key
+
+        hostile = ('{"api_key": 42}', '{"api_key": {"nested": 1}}', '{"api_key": ""}')
+        for content in hostile:
+            (tmp_path / "config.json").write_text(content)
+            assert load_api_key(tmp_path) == DEFAULT_API_KEY, content

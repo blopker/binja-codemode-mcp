@@ -45,6 +45,13 @@ def origin_allowed(origin: str | None) -> bool:
 
 class _Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
+    # Without this the socket blocks forever, so a client that opens a
+    # connection, promises a body and never sends it pins a handler thread for
+    # good — unauthenticated, and with nothing bounding how many. Applies per
+    # socket operation, not to the request as a whole, so a script running for
+    # the full execution timeout is unaffected: nothing is read or written
+    # while it runs.
+    timeout = 30
 
     # Injected by MCPHTTPServer before serving.
     mcp: Any
@@ -111,23 +118,50 @@ class _Handler(BaseHTTPRequestHandler):
         self._send(200, response)
 
     def do_GET(self) -> None:
-        # No server-initiated stream to open.
-        self._send_status(405, allow="POST")
+        # No server-initiated stream to open. Refused like any other request so
+        # the body is dealt with: a GET carrying one would otherwise leave it in
+        # the stream to be read as the next request.
+        self._reject(405, {"error": "Method not allowed. Use POST."}, allow="POST")
 
     def do_DELETE(self) -> None:
         # Stateless: no session to terminate.
-        self._send_status(405, allow="POST")
+        self._reject(405, {"error": "Method not allowed. Use POST."}, allow="POST")
 
-    def _reject(self, status: int, payload: dict[str, Any]) -> None:
-        """Reply to a request we are refusing, draining its body first."""
+    def _reject(
+        self, status: int, payload: dict[str, Any], allow: str | None = None
+    ) -> None:
+        """Reply to a request we are refusing, and deal with its body.
+
+        The answer goes out first. Draining first meant an unauthenticated
+        client could hold a handler thread for as long as it liked simply by
+        promising 8 MB and sending one byte, with the 401 never reaching it.
+        """
+        self._send(status, payload, allow=allow)
         self._drain()
-        self._send(status, payload)
 
     def _drain(self) -> None:
+        """Consume the request body, or close if it cannot be consumed.
+
+        An undrained body on a keep-alive connection is read as the start of the
+        next request, so a body can smuggle a whole pipelined request past the
+        check that just rejected this one.
+        """
+        encoding = (self.headers.get("Transfer-Encoding") or "").lower()
+        if "chunked" in encoding:
+            # We never parse chunk framing, so there is no safe way to find the
+            # end of this body. Closing is the only way to keep the stream sane.
+            self.close_connection = True
+            return
         try:
             length = int(self.headers.get("Content-Length") or 0)
         except ValueError:
-            length = 0
+            self.close_connection = True
+            return
+        if length > MAX_BODY_BYTES:
+            # We refused to read this much; we are not going to discard it
+            # either, so the connection cannot continue.
+            self.close_connection = True
+            return
         remaining = min(max(length, 0), MAX_BODY_BYTES)
         while remaining:
             chunk = self.rfile.read(min(remaining, 65536))
@@ -139,18 +173,31 @@ class _Handler(BaseHTTPRequestHandler):
             self.close_connection = True
 
     def _authorized(self) -> bool:
-        header = self.headers.get("Authorization", "")
-        return hmac.compare_digest(header, f"Bearer {self.api_key}")
+        # Compared as bytes: http.server decodes headers as latin-1, and
+        # hmac.compare_digest refuses str operands holding non-ASCII — so a
+        # header with a high byte in it raised TypeError, dropped the connection
+        # with no reply, and wrote a traceback into Binary Ninja's log, all
+        # before authenticating.
+        header = self.headers.get("Authorization", "").encode("latin-1", "replace")
+        expected = f"Bearer {self.api_key}".encode()
+        return hmac.compare_digest(header, expected)
 
-    def _send(self, status: int, payload: dict[str, Any]) -> None:
+    def _send(
+        self, status: int, payload: dict[str, Any], allow: str | None = None
+    ) -> None:
         body = json.dumps(payload).encode("utf-8")
         if len(body) > MAX_RESPONSE_BYTES:
-            body = json.dumps(_response_too_large(payload.get("id"), len(body))).encode(
-                "utf-8"
-            )
+            # Not payload["id"]: it is client-controlled and unbounded, so
+            # echoing it into the replacement made the reply that announces the
+            # limit larger than the limit. A 3 MB id produced a 3 MB refusal.
+            body = json.dumps(
+                _response_too_large(_safe_id(payload.get("id")), len(body))
+            ).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
+        if allow:
+            self.send_header("Allow", allow)
         self.end_headers()
         self.wfile.write(body)
 
@@ -164,6 +211,21 @@ class _Handler(BaseHTTPRequestHandler):
 
 def _parse_error(message: str = "Parse error") -> dict[str, Any]:
     return {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": message}}
+
+
+# An id long enough to matter is not a real correlation id. Anything past this
+# is dropped rather than echoed, so the reply announcing the size limit cannot
+# itself exceed it.
+MAX_ECHOED_ID_CHARS = 128
+
+
+def _safe_id(msg_id: Any) -> Any:
+    """The request id, if it is small enough to echo back safely."""
+    if isinstance(msg_id, str) and len(msg_id) > MAX_ECHOED_ID_CHARS:
+        return None
+    if isinstance(msg_id, (str, int, float)) or msg_id is None:
+        return msg_id
+    return None  # the spec allows only a string, number or null
 
 
 def _response_too_large(msg_id: Any, size: int) -> dict[str, Any]:

@@ -49,6 +49,7 @@ class BinjaCodeModeMCP:
                 config,
                 tabs_provider=list_tabs,
                 bn_module=binaryninja,
+                log=log_info,
             )
             server = MCPHTTPServer(
                 MCPHandler(backend),

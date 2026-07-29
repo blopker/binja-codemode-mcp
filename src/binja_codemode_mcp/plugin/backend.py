@@ -6,6 +6,7 @@ the real thing, and all three degrade to None without it.
 """
 
 import ast
+import contextlib
 import inspect
 import keyword
 import linecache
@@ -17,7 +18,7 @@ from typing import Any
 from ..config import Config
 from .executor import SCRIPT_PREFIX, Batch, CodeExecutor, ExecutionResult
 from .guide import render
-from .session import BinarySession, BinaryTab
+from .session import BinarySession, BinaryTab, _same_view
 
 # Supplied fresh on every call, so a saved function must never carry the
 # defining call's copies of these.
@@ -45,6 +46,19 @@ class _Saved:
     defaults: tuple[Any, ...] | None = None
     kwdefaults: dict[str, Any] | None = None
     annotations: dict[str, Any] = field(default_factory=dict)
+
+
+def _holds_a_view(value: Any) -> bool:
+    """Whether a value is a BinaryView, without importing Binary Ninja to ask.
+
+    Duck-typed on three attributes that only a view carries together, so this
+    stays true in tests and in the host alike.
+    """
+    return (
+        hasattr(value, "file")
+        and hasattr(value, "functions")
+        and hasattr(value, "start")
+    )
 
 
 def _referenced_names(code: types.CodeType) -> set[str]:
@@ -106,6 +120,20 @@ class _Library:
                 f"{key!r} must be defined in your script. A function from elsewhere "
                 f"({origin}) needs its own module's globals, which rebinding removes."
             )
+        # A view reached through a default, an annotation or a captured name is
+        # the same staleness the closure check refuses, wearing a different hat
+        # — and worse now that a saved function is meant to run against whatever
+        # binary the call targets. `def f(src=bv)` is the shape the closure
+        # message actively recommends, so it has to be caught here.
+        pinned = _pinned_views(fn, self._scope())
+        if pinned:
+            raise ValueError(
+                f"{key!r} holds a BinaryView through {pinned}. It would still "
+                "point at this call's binary when you run it against another "
+                "target, outside that target's transaction. Take the view as a "
+                "parameter and pass bv or h.read_only_view(name) at the call."
+            )
+
         try:
             source = inspect.getsource(fn)
         except OSError:  # its script aged out of the source cache
@@ -312,6 +340,26 @@ def _render_captured(captured: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n\n" if lines else ""
 
 
+def _pinned_views(fn: Any, scope: dict[str, Any] | None) -> str:
+    """Names a saved function would carry a BinaryView through, if any."""
+    found: list[str] = []
+    for i, value in enumerate(fn.__defaults__ or ()):
+        if _holds_a_view(value):
+            found.append(f"default argument {i + 1}")
+    for name, value in (fn.__kwdefaults__ or {}).items():
+        if _holds_a_view(value):
+            found.append(f"the default for {name}")
+    for name, value in getattr(fn, "__annotations__", {}).items():
+        if _holds_a_view(value):
+            found.append(f"the annotation on {name}")
+    if scope:
+        wanted = _referenced_names(fn.__code__)
+        for name, value in scope.items():
+            if name in wanted and name not in LIVE_GLOBALS and _holds_a_view(value):
+                found.append(f"the top-level name {name!r}")
+    return ", ".join(found)
+
+
 class Helpers:
     """The `h` global: the few things not in the Binary Ninja API."""
 
@@ -358,7 +406,10 @@ class Helpers:
         commits.
         """
         tab = self._session.resolve(key)
-        if self._target is not None and tab.name == self._target.name:
+        # By view, not by display name: two tabs can share a name — the same
+        # build opened twice, or a file reopened beside itself — and guarding on
+        # the name would refuse a legitimate read of the other one.
+        if self._target is not None and _same_view(tab.bv, self._target.bv):
             raise ValueError(
                 f"{tab.name!r} is this call's target — use `bv` to write to it. "
                 "h.read_only_view is for the other binary."
@@ -472,8 +523,10 @@ class PluginBackend:
         tabs_provider: Callable[[], list[BinaryTab]],
         bn_module: Any = None,
         watcher_factory: Callable[[Any], Any] | None = None,
+        log: Callable[[str], None] | None = None,
     ) -> None:
         self.config = config
+        self.log = log
         self.session = BinarySession(tabs_provider)
         self.helpers = Helpers(self.session)
         self.executor = CodeExecutor(
@@ -488,8 +541,10 @@ class PluginBackend:
             else make_watcher_factory(bn_module)
         )
 
-    def execute(self, code: str, target: Any = None) -> ExecutionResult:
-        result = self._execute(code, target)
+    def execute(
+        self, code: str, target: Any = None, description: str | None = None
+    ) -> ExecutionResult:
+        result = self._execute(code, target, description)
         # Every result carries the library, including the failures: a script
         # that saved a function and then raised keeps the definition, and the
         # footer is the only place either side can see that. Never at the cost
@@ -501,11 +556,21 @@ class PluginBackend:
             result.lib = ()
         return result
 
-    def _execute(self, code: str, target: Any) -> ExecutionResult:
+    def _execute(
+        self, code: str, target: Any, description: str | None = None
+    ) -> ExecutionResult:
         try:
             tab = self.session.resolve(target)
         except LookupError as e:
+            self._log(f"Code Mode MCP: refused — {e}")
             return ExecutionResult(success=False, output="", error=str(e))
+
+        # The log is where the user watches what is being done to their
+        # database, so say what and to which one before it happens rather than
+        # only afterwards — a script that never returns would otherwise leave
+        # no trace at all.
+        said = f" — {description}" if description else ""
+        self._log(f"Code Mode MCP: running on {tab.name}{said}")
 
         def on_call(scope: dict[str, Any], batch: Batch) -> None:
             self.helpers.bind_call(scope, batch, tab)
@@ -513,7 +578,7 @@ class PluginBackend:
         # Nothing here touches the UI. Changes recorded in the undo state
         # propagate to the view on their own, and driving a refresh from this
         # thread pulled Binary Ninja to the foreground mid-session.
-        return self.executor.execute(
+        result = self.executor.execute(
             code,
             target=tab.bv,
             target_name=tab.name,
@@ -522,6 +587,20 @@ class PluginBackend:
             on_call=on_call,
             watcher_factory=self._watcher_factory,
         )
+        if result.timed_out:
+            verdict = "timed out"
+        elif result.success:
+            verdict = "ok"
+        else:
+            verdict = "failed" + (", rolled back" if result.reverted else "")
+        self._log(f"Code Mode MCP: {verdict} in {result.elapsed_s:.1f}s")
+        return result
+
+    def _log(self, message: str) -> None:
+        if self.log is None:
+            return
+        with contextlib.suppress(Exception):  # logging must never take a call down
+            self.log(message)
 
     def running_script(self) -> tuple[str | None, float] | None:
         """A script in flight, for the status indicator to warn about."""

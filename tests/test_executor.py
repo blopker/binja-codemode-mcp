@@ -8,6 +8,7 @@ import pytest
 from binja_codemode_mcp.plugin.executor import (
     KEEP_SOURCES,
     SCRIPT_PREFIX,
+    Batch,
     CodeExecutor,
     ExecutionResult,
 )
@@ -269,6 +270,36 @@ class TestInterruption:
         assert executor.execute("print('recovered')", target=bv).output.strip() == (
             "recovered"
         )
+
+
+class TestBatchInvariants:
+    """Survivors from the mutation review: true of the code, pinned by nothing."""
+
+    def test_a_view_is_matched_by_value_not_identity(self, bv):
+        """Binary Ninja hands back a fresh Python wrapper around the same core
+        handle on every call, so identity would open a second transaction on a
+        binary this call already holds."""
+        batch = Batch()
+        batch.open_target(bv, "target")
+        twin = type(bv)(bv.name)  # a different object for the same binary
+        assert batch.holds(twin), "a fresh wrapper must not read as a new binary"
+
+    def test_settling_twice_closes_nothing_twice(self, bv):
+        """settle() hands its list off under the lock; without that a second
+        call would commit or revert states that are already closed."""
+        batch = Batch()
+        batch.open_target(bv, "target")
+        batch.settle(revert=False)
+        batch.settle(revert=False)
+        assert bv.committed == 1
+
+    def test_the_write_watcher_ignores_analysis_churn(self, bv):
+        """FunctionUpdated is excluded on purpose: analysis fires it unprompted,
+        so watching it would fail a call that only read."""
+        from binja_codemode_mcp.plugin.backend import _WRITE_NOTIFICATIONS
+
+        assert "FunctionUpdated" not in _WRITE_NOTIFICATIONS
+        assert "SymbolUpdated" in _WRITE_NOTIFICATIONS
 
 
 class TestQueueing:

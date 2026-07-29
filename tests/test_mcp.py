@@ -22,11 +22,15 @@ class FakeBackend:
         self.result = result or ExecutionResult(success=True, output="ok\n")
         self.executed: list[str] = []
         self.targets: list[Any] = []
+        self.descriptions: list[Any] = []
         self.guide_topics: list[str | None] = []
 
-    def execute(self, code: str, target: Any = None) -> ExecutionResult:
+    def execute(
+        self, code: str, target: Any = None, description: Any = None
+    ) -> ExecutionResult:
         self.executed.append(code)
         self.targets.append(target)
+        self.descriptions.append(description)
         return self.result
 
     def guide(self, topic: str | None) -> str:
@@ -167,6 +171,17 @@ class TestTools:
         )
         assert backend.targets == ["firmware-1.3"]
 
+    def test_the_description_reaches_the_backend(self, handler, backend):
+        """It is what the log line says the call is doing, so dropping it
+        silently would leave the user watching unlabelled scripts."""
+        call(
+            handler,
+            "tools/call",
+            name="execute",
+            arguments={"code": "pass", "description": "rename five functions"},
+        )
+        assert backend.descriptions == ["rename five functions"]
+
     def test_a_non_string_target_is_rejected_before_running(self, handler, backend):
         result = call(
             handler,
@@ -225,12 +240,34 @@ class TestResources:
         assert response["error"]["code"] == -32602
 
 
+class TestMalformedRequests:
+    """Shape errors are protocol errors, not internal ones — the old paths
+    leaked a Python exception where the spec defines a code."""
+
+    def test_positional_params_are_invalid_params(self, handler):
+        response = handler.handle(
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": ["x", {}]}
+        )
+        assert response["error"]["code"] == -32602
+        assert "AttributeError" not in response["error"]["message"]
+
+    def test_a_structured_method_is_an_invalid_request(self, handler):
+        response = handler.handle({"jsonrpc": "2.0", "id": 1, "method": {"a": 1}})
+        assert response["error"]["code"] == -32600
+
+    def test_a_missing_method_is_an_invalid_request(self, handler):
+        response = handler.handle({"jsonrpc": "2.0", "id": 1, "params": {}})
+        assert response["error"]["code"] == -32600
+
+
 class TestErrors:
     def test_unknown_method(self, handler):
         assert call(handler, "wat/list")["error"]["code"] == -32601
 
     def test_backend_exception_becomes_an_internal_error(self, handler):
-        def boom(code: str, target: Any = None) -> ExecutionResult:
+        def boom(
+            code: str, target: Any = None, description: Any = None
+        ) -> ExecutionResult:
             raise RuntimeError("backend died")
 
         handler.backend.execute = boom  # type: ignore[method-assign]
@@ -350,7 +387,7 @@ class TestResponseBudget:
         assert len(result["content"][0]["text"].encode()) <= MAX_RESULT_BYTES
 
     def test_an_internal_error_message_is_bounded(self, handler):
-        def boom(code: str, target: Any = None):
+        def boom(code: str, target: Any = None, description: Any = None):
             raise RuntimeError("x" * 200_000)
 
         handler.backend.execute = boom  # type: ignore[method-assign]

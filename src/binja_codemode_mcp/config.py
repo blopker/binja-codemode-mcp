@@ -38,9 +38,16 @@ def load_api_key(data_dir: Path) -> str:
         return DEFAULT_API_KEY
     try:
         with open(config_file) as f:
-            return json.load(f).get("api_key") or DEFAULT_API_KEY
+            loaded = json.load(f)
     except (json.JSONDecodeError, OSError):
         return DEFAULT_API_KEY
+    # Valid JSON that is not an object — `[]`, `null`, a bare number — used to
+    # reach `.get()` and raise, which the caller turned into "failed to start".
+    # A config file the server cannot read should never stop it running.
+    if not isinstance(loaded, dict):
+        return DEFAULT_API_KEY
+    key = loaded.get("api_key")
+    return key if isinstance(key, str) and key else DEFAULT_API_KEY
 
 
 @dataclass

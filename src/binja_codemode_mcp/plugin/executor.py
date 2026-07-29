@@ -14,6 +14,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from .session import _same_view
+
 # Scripts are compiled under a unique pseudo-filename per call, and their text
 # is registered where linecache can find it. That buys two things: tracebacks
 # quote the line that raised instead of just numbering it, and inspect.getsource
@@ -221,8 +223,15 @@ class Batch:
             )
 
     def holds(self, view: Any) -> bool:
+        """By value, never identity.
+
+        Binary Ninja returns a fresh Python wrapper around the same core handle
+        on every call, so identity would read a binary this call already holds
+        as a new one — and open a second undo state on it, which is the
+        interleaving the executor lock exists to prevent.
+        """
         with self._lock:
-            return any(h.view is view for h in self._held)
+            return any(_same_view(h.view, view) for h in self._held)
 
     def settle(self, revert: bool) -> tuple[bool, str | None]:
         """Close every open state. Returns (anything reverted, first failure).
