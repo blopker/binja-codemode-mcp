@@ -1,9 +1,13 @@
-"""Which binary is the target of an execute call.
+"""Which binary a call writes to.
 
 The tab list is resolved per request rather than captured once, so a binary
-opened later is reachable and edits cannot land on a stale view. The session
-pins its target, so a long analysis does not retarget when the user clicks
-another tab.
+opened later is reachable and a file that was closed and reopened simply works.
+
+There is deliberately **no pinned target**. The write target arrives as a
+parameter on every `execute` call, so nothing that decides where a write lands
+survives between calls: no state to go stale, no state for a failed or abandoned
+script to move, and no disagreement between the view the transaction was opened
+on and the view the script can see.
 
 Pure module: the tab list arrives through an injected provider, so this is
 testable without Binary Ninja.
@@ -13,14 +17,16 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+RAW_VIEW = "Raw"
+
 
 def _same_view(a: Any, b: Any) -> bool:
     """Compare BinaryViews by value, never by `is`.
 
     Binary Ninja hands back a fresh Python wrapper around the same core handle
     on each call, which is why BinaryView defines __eq__ as a comparison of
-    ctypes.addressof(self.handle.contents). Identity would make a pinned view
-    look closed on the very next request.
+    ctypes.addressof(self.handle.contents). Identity would make two references
+    to one open binary look like two different binaries.
     """
     if a is None or b is None:
         return False
@@ -41,113 +47,95 @@ class BinaryTab:
 
 
 class BinaryNotFoundError(LookupError):
-    """Raised when a requested binary is not open."""
+    """A target did not resolve to exactly one open binary."""
+
+
+def analysed_view(bv: Any) -> Any:
+    """Prefer an analysed view over Raw.
+
+    A tab shows one view at a time and the user can switch it from the GUI.
+    Handing back Raw because that is what they happen to be looking at gives the
+    model a database with no functions, which reads as an empty binary rather
+    than as the wrong view — so a stray click would silently make every lookup
+    return None. More than one non-Raw view is a corner case; first wins.
+    """
+    try:
+        if getattr(bv, "view_type", None) != RAW_VIEW:
+            return bv
+        meta = bv.file
+        for name in meta.existing_views:
+            if name != RAW_VIEW:
+                found = meta.get_view_of_type(name)
+                if found is not None:
+                    return found
+    except Exception:
+        pass
+    return bv
 
 
 class BinarySession:
-    """Tracks which open binary this MCP session is working on."""
+    """Resolves a target name to one open binary."""
 
     def __init__(self, tabs_provider: Callable[[], list[BinaryTab]]) -> None:
         self._tabs_provider = tabs_provider
-        self._pinned: Any = None
-        self._pinned_name: str | None = None
-        self._switch: tuple[str, BinaryTab] | None = None
 
     def tabs(self) -> list[BinaryTab]:
         return self._tabs_provider()
 
-    def current(self) -> BinaryTab | None:
-        """The pinned tab, pinning the first open one on first use."""
-        tabs = self.tabs()
-        if not tabs:
-            return None
-
-        if self._pinned is not None:
-            for tab in tabs:
-                if _same_view(tab.bv, self._pinned):
-                    return tab
-            # Pinned view was closed. Surface that rather than silently
-            # retargeting a different binary.
-            raise BinaryNotFoundError(
-                f"The selected binary ({self._pinned_name}) is no longer open. "
-                f"Call h.binaries() and h.select(<index>) to pick another."
-            )
-
-        self._pin(tabs[0])
-        return tabs[0]
-
-    def repin(self) -> BinaryTab | None:
-        """Drop the current pin and take the first open binary, if any.
-
-        Used when the pinned binary was closed: retargeting silently would be
-        wrong mid-analysis, but leaving the session permanently unusable is
-        worse, so the switch is recorded for the caller to report.
-        """
-        dropped = self._pinned_name
-        self._pinned = None
-        self._pinned_name = None
-        tabs = self.tabs()
-        if not tabs:
-            return None
-        self._pin(tabs[0])
-        if dropped is not None:
-            self._switch = (dropped, tabs[0])
-        return tabs[0]
-
-    def pending_switch(self) -> tuple[str, BinaryTab] | None:
-        """A retarget nobody has been told about yet. Does not clear it."""
-        return self._switch
-
-    def take_switch(self) -> tuple[str, BinaryTab] | None:
-        """The same, claiming it — for whoever puts it in front of the model.
-
-        Split from `pending_switch` so the guide can mention the switch without
-        consuming it: the caller that matters is the one about to write, and a
-        notice the guide swallowed is how a script ended up editing a database
-        nobody chose.
-        """
-        switch, self._switch = self._switch, None
-        return switch
-
-    def select(self, key: int | str) -> BinaryTab:
-        """Pin a binary by tab index or by (partial) name."""
-        tabs = self.tabs()
-        if not tabs:
-            raise BinaryNotFoundError("No binaries are open in Binary Ninja.")
-
-        match: BinaryTab | None = None
-        if isinstance(key, int):
-            for tab in tabs:
-                if tab.index == key:
-                    match = tab
-                    break
-        else:
-            candidates = [t for t in tabs if key in t.name or key in t.path]
-            if len(candidates) > 1:
-                names = ", ".join(f"[{t.index}] {t.name}" for t in candidates)
-                raise BinaryNotFoundError(f"{key!r} matches several tabs: {names}")
-            if candidates:
-                match = candidates[0]
-
-        if match is None:
-            names = ", ".join(f"[{t.index}] {t.name}" for t in tabs)
-            raise BinaryNotFoundError(f"No open binary matches {key!r}. Open: {names}")
-
-        self._pin(match)
-        return match
-
     def describe(self) -> list[dict[str, Any]]:
-        """Tab list for the guide header and the `h.binaries()` helper."""
+        """Open binaries, for the guide header and the `h.binaries()` helper."""
         return [
-            {
-                "index": tab.index,
-                "name": tab.name,
-                "path": tab.path,
-                "selected": _same_view(tab.bv, self._pinned),
-            }
+            {"index": tab.index, "name": tab.name, "path": tab.path}
             for tab in self.tabs()
         ]
 
-    def _pin(self, tab: BinaryTab) -> None:
-        self._pinned = tab.bv
-        self._pinned_name = tab.name
+    def resolve(self, key: Any = None) -> BinaryTab:
+        """The tab a target names, or the only one open when target is omitted."""
+        tabs = self.tabs()
+        if not tabs:
+            raise BinaryNotFoundError(
+                "No binaries are open in Binary Ninja. Open a file and try again."
+            )
+
+        if key is None:
+            if len(tabs) == 1:
+                return self._analysed(tabs[0])
+            raise BinaryNotFoundError(
+                f"{len(tabs)} binaries are open, so `target` is required — this "
+                f"call would otherwise have to guess where its writes land. "
+                f"Open: {self._names(tabs)}. Pass one as the `target` parameter, "
+                f'e.g. target="{tabs[0].name}".'
+            )
+
+        if isinstance(key, (bool, int)):
+            # Indices are assigned by tab order, so dragging a tab silently
+            # renames every target. Refuse rather than resolve something that
+            # will mean a different binary tomorrow.
+            raise BinaryNotFoundError(
+                f"target must be a name or path, not the index {key!r} — indices "
+                f"follow tab order and change when tabs are moved. "
+                f"Open: {self._names(tabs)}."
+            )
+
+        needle = str(key)
+        matches = [t for t in tabs if needle in t.name or needle in t.path]
+        if len(matches) > 1:
+            raise BinaryNotFoundError(
+                f"target {needle!r} matches several open binaries: "
+                f"{self._names(matches)}. Use a longer name or a full path."
+            )
+        if not matches:
+            raise BinaryNotFoundError(
+                f"No open binary matches target {needle!r}. Open: {self._names(tabs)}."
+            )
+        return self._analysed(matches[0])
+
+    def _analysed(self, tab: BinaryTab) -> BinaryTab:
+        view = analysed_view(tab.bv)
+        if view is tab.bv:
+            return tab
+        return BinaryTab(index=tab.index, name=tab.name, path=tab.path, bv=view)
+
+    @staticmethod
+    def _names(tabs: list[BinaryTab]) -> str:
+        return ", ".join(f'"{t.name}"' for t in tabs)

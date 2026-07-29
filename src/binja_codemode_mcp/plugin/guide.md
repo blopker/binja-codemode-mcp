@@ -14,8 +14,14 @@ abandoned, its changes are reverted when it eventually finishes, and nothing els
 until then. Prefer several focused calls to one sweeping one, sized from the
 `[1.4s of 30s]` footer on each result — your only signal about throughput on this binary.
 
-**Each call runs in one undo transaction.** If your script raises, every change it made is
-reverted, so you need no checkpoints and should not build your own rollback.
+**Each call runs in one undo transaction on its `target`.** If your script raises, every
+change it made is reverted, so you need no checkpoints and should not build your own
+rollback.
+
+**Do not let the user edit while a script runs.** A revert rewinds the database to where
+the transaction opened, so anything they change in the GUI during your call is rolled back
+too if you fail. The status indicator tells them; keep calls short and they will not
+overlap.
 
 **Do not touch the GUI.** Your script runs on a worker thread. Qt may only be used from
 Binary Ninja's main thread, so importing `binaryninjaui` or `PySide6` and calling into a
@@ -31,13 +37,15 @@ mixing them loses your place.
 
 ## Environment
 
-`bv` is the selected `BinaryView` — the real thing, not a wrapper — and `bn` is the
-`binaryninja` module. Everything on `bv` works, and so does ordinary Python. A few
+`bv` is the `BinaryView` your call's `target` names — the real thing, not a wrapper — and
+`bn` is the `binaryninja` module. **`bv` is the only view you can write to.** With one
+binary open you can leave `target` out; with more than one it is required, because a call
+that guessed could put a write in a database you did not choose. Everything on `bv` works, and so does ordinary Python. A few
 helpers cover what the Binary Ninja API does not:
 
-- `h.binaries()` — list open tabs.
-- `h.select(index_or_name)` — pick which one to work on. It rebinds `bv` immediately, so
-  you can select and then edit in the same script.
+- `h.binaries()` — list open binaries and the names a `target` can use.
+- `h.read_only_view(name)` — another open binary, to read from. Writing through it is
+  detected, rolled back, and fails the call.
 - `h.lib` — functions saved for later calls, and `h.lib_sources()` to dump them.
 
 **You have the filesystem.** There is no sandbox: `open()`, `pathlib`, `struct`,
@@ -94,16 +102,18 @@ once — a filter, a check, a port step — and call it from later scripts inste
 re-emitting the code and getting it subtly different each time.
 
 ```python
-def unported(src=1):
+def unported(src):
     """Addresses named in the source build but not in the destination."""
-    h.select(src)
-    names = {f.start: f.name for f in bv.functions}
-    h.select(0)
-    return [a for a, n in names.items()
+    named = {f.start: f.name for f in src.functions if not f.symbol.auto}
+    return [a for a, n in named.items()
             if (g := bv.get_function_at(a)) and g.name != n]
 
 h.lib["unported"] = unported
+print(h.lib.unported(h.read_only_view("firmware-1.2")))
 ```
+
+Take views as parameters rather than reaching for them inside: the call's `target` decides
+what `bv` is, so a saved function stays correct whichever binary it is pointed at.
 
 Then, from any later call:
 
@@ -153,27 +163,40 @@ function each time you call it.
 ## Working across two databases
 
 Porting annotations, diffing builds, or carrying a type library forward is one pattern:
-read into locals from one view, `h.select()` the other, write.
+name the **destination** as the call's `target`, read the source through
+`h.read_only_view`, write to `bv`.
 
 ```python
-h.select(1)                                   # source
-src = {f.start: (f.name, f.type) for f in bv.functions}
+# target="firmware-1.3"
+src = h.read_only_view("firmware-1.2")        # annotated build, read only
 
-h.select(0)                                   # destination
-for addr, (name, tobj) in src.items():
-    f = bv.get_function_at(addr)
-    if f:
-        f.type = tobj                         # prototype, parameters, convention
-        f.name = name                         # the type assignment does not set this
+for f in bv.functions:                        # the destination, in a transaction
+    match = src.get_function_at(f.start)
+    if match and not match.symbol.auto:       # human work only — see below
+        f.type = match.type                   # prototype, parameters, convention
+        f.name = match.name                   # the type assignment does not set this
 ```
+
+The asymmetry is the safety: `bv` is the one view in a transaction, so a failure rolls the
+destination back cleanly, and a stray write to the source is detected and undone rather
+than left behind.
+
+**Addresses only match when the builds match.** `get_function_at(f.start)` is right for a
+recompile of the same source and wrong for a real update, where code has moved. Match on
+something stable — identical body bytes, an imported-symbol anchor, a string reference —
+and port in tiers: everything for an exact match, name and prototype only for a changed
+body, nothing at all for a guess. A wrong name is worse than no name.
 
 **Core objects move between views directly.** A `Type` or `Variable` read from one
-BinaryView can be applied to another with no serialisation:
+BinaryView applies to another with no serialisation:
 
 ```python
-h.select(1); tobj = bv.get_type_by_name("config_t")
-h.select(0); bv.define_user_type("config_t", tobj)
+tobj = src.get_type_by_name("config_t")
+bv.define_user_type("config_t", tobj)
 ```
+
+This is why both views live in one call: a `Type` cannot survive to the next one — it is
+not serialisable and `h.lib` stores functions, not values.
 
 Widths, parameter names, struct-pointer parameters, and calling conventions all survive.
 Do **not** round-trip through C source with `parse_types_from_string` — it is far slower,

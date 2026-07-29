@@ -1,8 +1,9 @@
-"""Runs LLM-submitted Python against a live BinaryView.
+"""Runs LLM-submitted Python against live BinaryViews.
 
-Pure module: `bv` is duck-typed, so this is testable without Binary Ninja.
+Pure module: views are duck-typed, so this is testable without Binary Ninja.
 """
 
+import contextlib
 import itertools
 import linecache
 import threading
@@ -69,6 +70,8 @@ class _Outcome:
     error: str | None = None
     reverted: bool = False  # set by the worker, read by the caller
     abandoned: bool = False  # set by the caller, read by the worker
+    settling: bool = False  # the script finished; transactions are closing
+    settled: bool = False  # the worker closed its transactions and is done
 
 
 class _Budget:
@@ -109,8 +112,113 @@ class _Budget:
         )
 
 
+@dataclass
+class _Held:
+    """One open undo state."""
+
+    view: Any
+    state: Any
+    name: str
+    written: Callable[[], bool] | None = None  # None for the write target
+    release: Callable[[], None] | None = None
+
+
+class Batch:
+    """The undo states one call holds open.
+
+    The write target's state opens before the script runs, so a write to it is
+    inside a transaction by construction rather than by luck. A read-only view's
+    state opens when the script asks for the view, and how it closes depends on
+    whether anything wrote to it: reverted if something did, committed if
+    nothing did. An empty commit is silent where an empty revert raises the
+    Binary Ninja window, so the ordinary two-database call costs nothing and a
+    stray write to the source is undone rather than left unprotected.
+    """
+
+    def __init__(self, watcher_factory: Callable[[Any], Any] | None = None) -> None:
+        self._watcher_factory = watcher_factory
+        self._held: list[_Held] = []
+        self._lock = threading.Lock()
+        self.violations: list[str] = []
+
+    def open_target(self, view: Any, name: str) -> None:
+        state = view.begin_undo_actions()
+        with self._lock:
+            self._held.append(_Held(view=view, state=state, name=name))
+
+    def open_read_only(self, view: Any, name: str) -> None:
+        """Open a state that will revert if the script writes through it."""
+        written: Callable[[], bool] | None = None
+        release: Callable[[], None] | None = None
+        if self._watcher_factory is not None:
+            watcher = self._watcher_factory(view)
+            if watcher is not None:
+                written, release = watcher
+        state = view.begin_undo_actions()
+        with self._lock:
+            self._held.append(
+                _Held(
+                    view=view,
+                    state=state,
+                    name=name,
+                    written=written,
+                    release=release,
+                )
+            )
+
+    def holds(self, view: Any) -> bool:
+        with self._lock:
+            return any(h.view is view for h in self._held)
+
+    def settle(self, revert: bool) -> tuple[bool, str | None]:
+        """Close every open state. Returns (anything reverted, first failure).
+
+        Never raises: a settle that throws would escape the worker and skip the
+        lock release, wedging every later call, and an exception here has to be
+        reported rather than mistaken for success.
+        """
+        with self._lock:
+            held, self._held = self._held, []
+        reverted = False
+        failure: str | None = None
+
+        for entry in reversed(held):
+            if entry.release is not None:
+                # A watcher must never decide the outcome.
+                with contextlib.suppress(Exception):
+                    entry.release()
+
+            wrote = False
+            if entry.written is not None:
+                try:
+                    wrote = bool(entry.written())
+                except Exception:
+                    wrote = True  # assume the worst and undo it
+                if wrote:
+                    self.violations.append(entry.name)
+
+            # The target follows the caller's verdict; a read-only view follows
+            # whether anything wrote through it.
+            undo_this = revert if entry.written is None else wrote
+            try:
+                if undo_this:
+                    entry.view.revert_undo_actions(entry.state)
+                    reverted = True
+                else:
+                    entry.view.commit_undo_actions(entry.state)
+            except Exception as e:
+                verb = "revert" if undo_this else "commit"
+                if failure is None:
+                    failure = (
+                        f"Failed to {verb} the undo transaction on {entry.name}: "
+                        f"{type(e).__name__}: {e}. The database may be in an "
+                        "inconsistent state; check it before continuing."
+                    )
+        return reverted, failure
+
+
 class CodeExecutor:
-    """Executes a script in one undo transaction and captures its output.
+    """Executes a script against one write target and captures its output.
 
     There is deliberately no sandbox: the submitted code gets real builtins and
     real imports. An AST filter cannot contain it anyway — CPython injects the
@@ -123,14 +231,17 @@ class CodeExecutor:
         self,
         max_output_bytes: int = 32_000,
         timeout: float = 30.0,
+        queue_wait: float = 5.0,
     ) -> None:
         self.max_output_bytes = max_output_bytes
         self.timeout = timeout
+        self.queue_wait = queue_wait
         # One script at a time. Two open undo states on one database interleave:
         # reverting the inner one rewinds whatever the outer one recorded after
         # it, so a failing script can silently roll back a successful one.
         self._busy = threading.Lock()
         self._started_at: float | None = None
+        self._running_target: str | None = None
         self._idle = threading.Event()
         self._idle.set()
 
@@ -138,19 +249,21 @@ class CodeExecutor:
         self,
         code: str,
         *,
-        bv: Any,
+        target: Any,
+        target_name: str = "the target",
         bn: Any = None,
         helpers: Any = None,
         extra: dict[str, Any] | None = None,
-        on_scope: Callable[[dict[str, Any]], None] | None = None,
+        on_call: Callable[[dict[str, Any], Batch], None] | None = None,
+        watcher_factory: Callable[[Any], Any] | None = None,
     ) -> ExecutionResult:
-        if bv is None:
+        if target is None:
             return ExecutionResult(
                 success=False,
                 output="",
                 error=(
-                    "No binary selected. Open a file in Binary Ninja, or call "
-                    "h.binaries() to list open tabs and h.select(<index>) to pick one."
+                    "No binary to work on. Open a file in Binary Ninja, or call "
+                    "h.binaries() to list what is open and pass one as `target`."
                 ),
             )
 
@@ -160,118 +273,166 @@ class CodeExecutor:
         except SyntaxError as e:
             return ExecutionResult(success=False, output="", error=f"Syntax error: {e}")
 
-        if not self._busy.acquire(blocking=False):
-            running_for = time.time() - (self._started_at or time.time())
+        # Queue rather than refuse. Clients issue tool calls in parallel and the
+        # ordinary script finishes in well under a second, so an instant refusal
+        # turned a collision that would have resolved itself into a failure the
+        # model had to understand and retry.
+        if not self._busy.acquire(timeout=self.queue_wait):
+            started_at = self._started_at
+            running_for = time.time() - started_at if started_at else 0.0
+            on = self._running_target
+            whose = f" on {on}" if on else ""
             return ExecutionResult(
                 success=False,
                 output="",
                 error=(
-                    f"A previous script is still running ({running_for:.0f}s so far) "
-                    "and cannot be interrupted. Its changes will be discarded when it "
-                    "finishes. Wait for it, or restart Binary Ninja if it is wedged."
+                    f"Waited {self.queue_wait:.0f}s, but a previous script is still "
+                    f"running{whose} ({running_for:.0f}s so far) and cannot be "
+                    "interrupted. Its changes will be discarded when it finishes. "
+                    "Wait for it, or restart Binary Ninja if it is wedged."
                 ),
             )
 
-        publish_source(script_name, code)
+        # Everything from here to the worker's `finally` must be exception-safe:
+        # anything that escapes leaves the lock held and every later call
+        # refused for the life of the process.
         started = time.time()
-        self._started_at = started
-        self._idle.clear()
-        budget = _Budget(self.max_output_bytes)
-
-        def captured_print(*args: Any, **kwargs: Any) -> None:
-            """print() is the result channel; output must be verbatim so the
-            model can parse it."""
-            sep = kwargs.get("sep", " ")
-            end = kwargs.get("end", "\n")
-            budget.write(sep.join(str(a) for a in args) + end)
-
-        # Same dict for globals and locals: with separate dicts, names bound at
-        # the top level land in `locals` while nested scopes resolve against
-        # `globals`, so functions and comprehensions raise NameError.
-        scope: dict[str, Any] = {
-            "__name__": "__binja_mcp__",
-            "bv": bv,
-            "bn": bn,
-            "h": helpers,
-            "print": captured_print,
-        }
-        if extra:
-            scope.update(extra)
-        if on_scope is not None:
-            # Lets h.select() rebind `bv` for the rest of the running script,
-            # instead of the switch only taking effect on the next call.
-            on_scope(scope)
-
         outcome = _Outcome()
+        budget = _Budget(self.max_output_bytes)
+        batch = Batch(watcher_factory)
+        try:
+            publish_source(script_name, code)
+            self._started_at = started
+            self._running_target = target_name
+            self._idle.clear()
 
-        def settle(undo: Any, revert: bool) -> None:
-            """Always close the undo state.
+            def captured_print(*args: Any, **kwargs: Any) -> None:
+                """print() is the result channel; output must be verbatim so the
+                model can parse it."""
+                sep = kwargs.get("sep", " ")
+                end = kwargs.get("end", "\n")
+                budget.write(sep.join(str(a) for a in args) + end)
 
-            KNOWN COST: revert_undo_actions raises the Binary Ninja window,
-            even when the transaction recorded nothing. So every failed script
-            — a typo, an AttributeError on line one — pulls the GUI to the
-            foreground. Measured in isolation against a live instance: an empty
-            commit is silent, an empty revert pops. Accepted deliberately.
-
-            The tempting fix is to skip the settle when nothing changed, and
-            there is no sound way to know that. An earlier version gated on
-            `bv.file.modified`, which does not track script mutations at all —
-            it stays False through a rename — so the skip silently stopped
-            failed scripts reverting, and a raised script kept its changes.
-            `undoable_actions()` does not exist; `file.undo_entries` only grows
-            on commit, so it cannot answer the question in flight either.
-
-            Committing first and calling bv.undo() when an entry appears would
-            work, but the signal is unverifiable from inside a transaction, and
-            it leaves the failed batch on the redo stack where a stray redo
-            resurrects it. Not worth trading the guarantee for a window raise.
-            """
-            if revert:
-                bv.revert_undo_actions(undo)
-                outcome.reverted = True
-                return
-            bv.commit_undo_actions(undo)
+            # Same dict for globals and locals: with separate dicts, names bound
+            # at the top level land in `locals` while nested scopes resolve
+            # against `globals`, so functions and comprehensions raise NameError.
+            scope: dict[str, Any] = {
+                "__name__": "__binja_mcp__",
+                "bv": target,
+                "bn": bn,
+                "h": helpers,
+                "print": captured_print,
+            }
+            if extra:
+                scope.update(extra)
+            if on_call is not None:
+                on_call(scope, batch)
+        except BaseException as e:  # nothing ran; hand the lock back
+            self._started_at = None
+            self._running_target = None
+            self._idle.set()
+            self._busy.release()
+            return ExecutionResult(
+                success=False,
+                output="",
+                error=f"Failed to prepare the call: {type(e).__name__}: {e}",
+            )
 
         def run() -> None:
-            # The manual undo API rather than `with bv.undoable_transaction()`:
-            # a script that outran the timeout has to revert on its way out, and
-            # the context manager would commit.
-            undo = bv.begin_undo_actions()
             try:
-                exec(compiled, scope, scope)
-            except BaseException as e:
-                # BaseException, not Exception: sys.exit() inside a script
-                # reverts the batch just the same, so reporting success for it
-                # would be a lie.
-                outcome.error = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
-                settle(undo, revert=True)
-            else:
-                settle(undo, revert=outcome.abandoned)
+                try:
+                    batch.open_target(target, target_name)
+                except BaseException as e:
+                    outcome.error = (
+                        f"Could not open an undo transaction on {target_name}: "
+                        f"{type(e).__name__}: {e}"
+                    )
+                    return
+                try:
+                    exec(compiled, scope, scope)
+                except BaseException as e:
+                    # BaseException, not Exception: sys.exit() inside a script
+                    # reverts the batch just the same, so reporting success for
+                    # it would be a lie.
+                    outcome.error = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
+                    revert = True
+                else:
+                    revert = outcome.abandoned
+                # Set before settling, not after: a commit that outruns the
+                # deadline cannot be called back, so the caller has to be able
+                # to tell "still running, will revert" from "already landing".
+                outcome.settling = True
+                reverted, failure = batch.settle(revert=revert)
+                outcome.reverted = reverted
+                if batch.violations:
+                    views = ", ".join(sorted(set(batch.violations)))
+                    note = (
+                        f"Wrote to {views}, which this call opened read-only. "
+                        "Those changes were rolled back — make it the `target` "
+                        "of its own call to write to it."
+                    )
+                    outcome.error = (
+                        f"{outcome.error}\n\n{note}" if outcome.error else note
+                    )
+                if failure is not None:
+                    outcome.error = (
+                        f"{outcome.error}\n\n{failure}" if outcome.error else failure
+                    )
             finally:
+                # Set before releasing the lock: the caller reads `settled` to
+                # decide whether a script that outran the deadline still landed.
+                outcome.settled = True
                 self._started_at = None
+                self._running_target = None
                 self._idle.set()
                 self._busy.release()
 
         thread = threading.Thread(target=run, daemon=True, name="binja-mcp-exec")
-        thread.start()
+        try:
+            thread.start()
+        except BaseException as e:
+            self._started_at = None
+            self._running_target = None
+            self._idle.set()
+            self._busy.release()
+            return ExecutionResult(
+                success=False,
+                output="",
+                error=f"Could not start the execution thread: {type(e).__name__}: {e}",
+            )
         thread.join(timeout=self.timeout)
 
-        if thread.is_alive():
-            # The thread cannot be killed. Mark the batch abandoned so it
-            # reverts instead of committing after this call has already reported
-            # failure, and leave the lock held so nothing overlaps it.
+        # `settled`, not `thread.is_alive()`. join() waits for full thread exit,
+        # which happens after the transaction closes — so a script that finished
+        # just under the deadline but whose commit ran past it would otherwise be
+        # reported as discarded while its changes had in fact landed, and the
+        # model would re-run it and apply everything twice.
+        if not outcome.settled:
             outcome.abandoned = True
-            elapsed = time.time() - (self._started_at or time.time())
+            elapsed = time.time() - started
+            if outcome.settling:
+                # The script itself finished; the database is mid-commit and
+                # cannot be called back. Claiming a rollback here would send the
+                # model to re-run work that in fact landed.
+                detail = (
+                    "the script finished but is still closing its transaction, so "
+                    "its changes are most likely being applied. Read the database "
+                    "back before re-running any of it."
+                )
+            else:
+                detail = (
+                    "the script cannot be interrupted, so its changes are reverted "
+                    "when it finishes."
+                )
             return ExecutionResult(
                 success=False,
                 output=budget.value(),
                 elapsed_s=elapsed,
+                timeout_s=self.timeout,
                 error=(
                     f"Execution timed out after {elapsed:.1f}s (limit "
-                    f"{self.timeout}s) and was discarded: the script cannot be "
-                    "interrupted, so its changes are reverted when it finishes. "
-                    "Partial output above. Narrow the work: filter before "
-                    "iterating, or process in batches."
+                    f"{self.timeout}s): {detail} Partial output above. Narrow the "
+                    "work: filter before iterating, or process in batches."
                 ),
                 timed_out=True,
             )

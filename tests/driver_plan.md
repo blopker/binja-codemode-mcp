@@ -54,9 +54,8 @@ Report those three results, then leave it alone until the Checkpoint.
 **A1 — the guide describes the live session.** Call `binja_guide` with no `topic` (the one
 case that wants the whole document). Expect a Mach-O view, an architecture, a non-zero
 function count, "Analysis: complete", a version, and two open tabs with one marked
-selected. Any `?`, `0`, or `unknown` is a failure. Which binary starts selected is up to
-Binary Ninja's tab order and is *not* necessarily the one opened first — read it off the
-header rather than assuming, and `h.select("ls-a")` before section B.
+named. Any `?`, `0`, or `unknown` is a failure. Nothing is "selected" any more — every
+call names its own `target`, so the header is where you learn what names are valid.
 
 **A2 — the globals are real.** `print(type(bv).__module__, type(bv).__name__)`,
 `bn.core_version()`, `h.binaries()`. Expect `binaryninja.binaryview BinaryView`, a version,
@@ -94,21 +93,37 @@ undo side. Check the actions count before concluding anything.
 
 ## C. Multiple binaries
 
-**C1 — the pin is stable and does not follow focus.** Print `bv.file.filename` in three
-consecutive calls: expect the same path each time, and `ls-a` even though `ls-b` is also
-open. A "no longer open" error here means the session cannot hold a target at all.
+**C1 — no target is refused, not guessed.** With both open, send any script *without* a
+`target`. Expect an error naming both candidates and showing the parameter. A call that
+picks one for you is the wrong-database write this design exists to prevent.
 
-**C2 — select and edit in one script.** The case that failed in the first live run:
+**C2 — the target decides where writes land.** With `target="ls-b"`:
 
 ```python
-print(h.select("ls-b"))
 print(bv.file.filename)
-bv.get_function_at(bv.entry_point).name = "driver_selected_here"
+bv.get_function_at(bv.entry_point).name = "driver_target_here"
 ```
 
-Expect `ls-b` both times, and verify in a second call that `ls-a`'s entry function is
-untouched. A rename landing in `ls-a` while the tool reports success is a wrong-database
-write — record it as critical. **Leave `ls-b` selected**; the Checkpoint depends on it.
+Expect `ls-b`, and verify in a second call (`target="ls-a"`) that `ls-a`'s entry function
+is untouched. A rename landing in `ls-a` while the tool reports success is critical.
+
+**C3 — the source is readable and not writable.** With `target="ls-a"`:
+
+```python
+src = h.read_only_view("ls-b")
+print(src.file.filename, len(src.functions))
+print(src.get_function_at(src.entry_point).name)     # reading is fine
+```
+
+Expect `ls-b` and its function count. Then, in a separate call, try to write through it —
+`h.read_only_view("ls-b").get_function_at(...).name = "nope"`. Expect the call to **fail**,
+the message to name `ls-b`, and a third call to confirm the name did not change. Also
+confirm `h.read_only_view("ls-a")` while targeting `ls-a` is refused with a message
+pointing at `bv`.
+
+**C4 — a Type object crosses views.** Target `ls-a`, read a type from `ls-b` through
+`h.read_only_view`, and apply it with `bv.define_user_type`. This is the reason both views
+are live in one call rather than one per call; if it fails, say how.
 
 ## D. Limits and failure modes
 
@@ -166,10 +181,11 @@ a model reach for it unprompted**.
 it in a later call, and confirm the footer lists it. Then `print(h.lib)`,
 `h.lib.<name>.source`, `h.lib_sources()`, `del h.lib.<name>`.
 
-**G2 — the rebinding.** Save a function returning `bv.file.filename`. Call it, `h.select`
-the other binary, call it again: the answers must differ. A stored function reporting the
-first binary forever is exactly the staleness this exists to avoid. Also confirm a saved
-function's `print()` output comes back in the calling script's result.
+**G2 — saved functions follow the call's target.** Save a function returning
+`bv.file.filename`. Call it with `target="ls-a"`, then with `target="ls-b"`: the answers
+must differ, without the function being redefined. Then save one that takes a view as a
+parameter and pass `h.read_only_view(...)` to it. Also confirm a saved function's
+`print()` output comes back in the calling script's result.
 
 **G3 — what it carries, what it refuses.** A script that does `import json` at the top and
 saves a function using it must still work several calls later, and so must one reading a
@@ -196,14 +212,15 @@ Ask for all of this in one message, then stop.
    longer does, on the theory that undo-registered changes propagate on their own.
 2. Close the **`ls-b`** tab.
 3. Save `ls-a` (⌘S), close its tab, reopen the `.bndb`.
+4. While a script is running, do **not** edit the database — a failed script reverts to
+   where its transaction opened and would take your edit with it. Section D2 runs for 30
+   seconds; leave it alone.
 
 ## F. After the Checkpoint
 
-**F1 — a closed target is reported, once.** `ls-b` was selected and is now gone. Call
-`binja_guide` *first*: the header must carry a `NOTE:` naming what closed and what is
-selected now. Then `execute`: it must be refused once with the same fact, and the call
-after that must succeed. Both halves matter — the guide call used to absorb the notice, and
-the next script then wrote to a database nobody had chosen, silently.
+**F1 — a closed binary is simply gone.** `ls-b` is closed. A call with `target="ls-b"`
+must fail saying no open binary matches, and list what is open. A call targeting `ls-a`
+must work immediately — there is no pin to recover, so nothing should need a retry.
 
 **F2 — edits survive a save.** Read the five `driver_test_*` names back from the reopened
 `ls-a`. This is the exact failure the rewrite targets: edits that looked applied and

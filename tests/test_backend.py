@@ -27,62 +27,170 @@ class TestExecute:
         result = backend.execute("print([b['name'] for b in h.binaries()])")
         assert result.output.strip() == "['target']"
 
-    def test_helpers_can_switch_binary(self, config, bv):
-        other = type(bv)("other")
-        tabs = [
-            BinaryTab(0, "target", "/bin/target", bv),
-            BinaryTab(1, "other", "/bin/other", other),
-        ]
-        backend = PluginBackend(config, tabs_provider=lambda: tabs)
-
-        backend.execute("h.select('other')")
-        backend.execute("bv.rename('from_other')")
-        assert other.renames == ["from_other"]
-        assert bv.renames == []
-
-    def test_select_rebinds_bv_within_the_same_script(self, config, bv):
-        """Selecting and then editing in one script is the obvious thing to
-        write; if `bv` still pointed at the old binary the edit would land in
-        the wrong database and still report success."""
-        other = type(bv)("other")
-        tabs = [
-            BinaryTab(0, "target", "/bin/target", bv),
-            BinaryTab(1, "other", "/bin/other", other),
-        ]
-        backend = PluginBackend(config, tabs_provider=lambda: tabs)
-
-        result = backend.execute("h.select('other')\nbv.rename('landed')")
-        assert result.success
-        assert other.renames == ["landed"]
-        assert bv.renames == []
-
-    def test_closing_the_pinned_binary_is_recoverable(self, config, bv):
-        """The session must not be permanently dead: the script does not run
-        when the pin is stale, so advice to call h.select() is unactionable."""
-        other = type(bv)("other")
-        tabs = [
-            BinaryTab(0, "target", "/bin/target", bv),
-            BinaryTab(1, "other", "/bin/other", other),
-        ]
-        open_tabs = [list(tabs)]
-        backend = PluginBackend(config, tabs_provider=lambda: open_tabs[0])
-        backend.execute("pass")  # pins "target"
-
-        open_tabs[0] = [BinaryTab(0, "other", "/bin/other", other)]
-        first = backend.execute("bv.rename('a')")
-        assert not first.success
-        assert "no longer open" in (first.error or "")
-        assert "other" in (first.error or "")
-
-        second = backend.execute("bv.rename('b')")
-        assert second.success, "the session must be usable again"
-        assert other.renames == ["b"]
-
     def test_no_binary_open_is_a_clean_error(self, config):
         backend = PluginBackend(config, tabs_provider=list)
         result = backend.execute("print(1)")
         assert not result.success
-        assert "No binary selected" in (result.error or "")
+        assert "No binaries are open" in (result.error or "")
+
+
+class TestTargeting:
+    """The write target arrives with the call, so a write can never land in a
+    database the caller did not name."""
+
+    def _two(self, config, bv):
+        other = type(bv)("other")
+        tabs = [
+            BinaryTab(0, "target", "/bin/target", bv),
+            BinaryTab(1, "other", "/bin/other", other),
+        ]
+        return PluginBackend(config, tabs_provider=lambda: tabs), other
+
+    def test_the_target_names_where_writes_land(self, config, bv):
+        backend, other = self._two(config, bv)
+        assert backend.execute("bv.rename('landed')", "other").success
+        assert other.renames == ["landed"]
+        assert bv.renames == []
+
+    def test_two_binaries_without_a_target_is_refused(self, config, bv):
+        backend, other = self._two(config, bv)
+        result = backend.execute("bv.rename('nope')")
+        assert not result.success
+        assert "`target` is required" in (result.error or "")
+        assert bv.renames == [] and other.renames == []
+
+    def test_the_write_target_is_the_one_in_a_transaction(self, config, bv):
+        """The bug this replaced: the transaction was opened on whichever view
+        happened to be pinned, so a write elsewhere had no transaction at all
+        and a raise reverted the untouched database."""
+        backend, other = self._two(config, bv)
+        result = backend.execute("bv.rename('gone')\nraise ValueError('boom')", "other")
+        assert not result.success
+        assert other.transactions == 1 and other.reverted == 1
+        assert other.renames == []
+        assert bv.transactions == 0
+
+    def test_a_reopened_binary_needs_no_recovery(self, config, bv):
+        open_tabs = [[BinaryTab(0, "target", "/bin/target", bv)]]
+        backend = PluginBackend(config, tabs_provider=lambda: open_tabs[0])
+        assert backend.execute("pass").success
+        open_tabs[0] = [BinaryTab(0, "target", "/bin/target", type(bv)("target"))]
+        assert backend.execute("bv.rename('after')").success
+
+
+class TestReadOnlyView:
+    """One view is writable; the other is named for what it is."""
+
+    def _two(self, config, bv, watcher=None):
+        other = type(bv)("other")
+        tabs = [
+            BinaryTab(0, "target", "/bin/target", bv),
+            BinaryTab(1, "other", "/bin/other", other),
+        ]
+        backend = PluginBackend(
+            config, tabs_provider=lambda: tabs, watcher_factory=watcher
+        )
+        return backend, other
+
+    def test_reads_from_the_other_binary(self, config, bv):
+        backend, other = self._two(config, bv)
+        result = backend.execute(
+            'src = h.read_only_view("other")\nprint(src.file.filename)', "target"
+        )
+        assert result.output.strip() == "/bin/other"
+
+    def test_both_views_are_live_in_one_call(self, config, bv):
+        """Type objects cross views directly and cannot survive between calls,
+        so a port needs both in scope at once."""
+        backend, other = self._two(config, bv)
+        result = backend.execute(
+            'src = h.read_only_view("other")\n'
+            "bv.rename(src.file.filename)\n"
+            "print(bv.renames)",
+            "target",
+        )
+        assert result.success
+        assert bv.renames == ["/bin/other"]
+
+    def test_asking_for_the_target_is_refused(self, config, bv):
+        backend, other = self._two(config, bv)
+        result = backend.execute('h.read_only_view("target")', "target")
+        assert not result.success
+        assert "this call's target" in (result.error or "")
+
+    def test_a_clean_read_commits_silently(self, config, bv):
+        """An empty commit is silent where an empty revert raises the Binary
+        Ninja window, so the ordinary two-database call costs nothing."""
+        backend, other = self._two(config, bv, watcher=_never_written)
+        assert backend.execute('h.read_only_view("other")', "target").success
+        assert other.committed == 1
+        assert other.reverted == 0
+
+    def test_a_write_through_it_is_rolled_back_and_fails_the_call(self, config, bv):
+        backend, other = self._two(config, bv, watcher=_always_written)
+        result = backend.execute(
+            'src = h.read_only_view("other")\nsrc.rename("sneaky")', "target"
+        )
+        assert not result.success
+        assert "read-only" in (result.error or "")
+        assert "other" in (result.error or "")
+        assert other.reverted == 1
+        assert other.renames == []
+
+
+def _never_written(view):
+    return (lambda: False, lambda: None)
+
+
+def _always_written(view):
+    return (lambda: True, lambda: None)
+
+
+class TestUndoApiFailures:
+    """The undo API can raise. Nothing here may leave the lock held or report a
+    script that did not run as a success."""
+
+    def _backend(self, config, view):
+        tabs = [BinaryTab(0, "target", "/bin/target", view)]
+        return PluginBackend(config, tabs_provider=lambda: tabs)
+
+    def test_a_failure_to_open_is_reported_not_swallowed(self, config):
+        from conftest import FakeBinaryView
+
+        backend = self._backend(config, FakeBinaryView("t", raise_on=("begin",)))
+        result = backend.execute("print('never runs')")
+        assert not result.success
+        assert "undo transaction" in (result.error or "")
+
+    def test_a_failure_to_open_leaves_the_executor_usable(self, config):
+        """It used to hold the lock for the life of the process, so every later
+        call was refused against a thread that no longer existed."""
+        from conftest import FakeBinaryView
+
+        view = FakeBinaryView("t", raise_on=("begin",))
+        backend = self._backend(config, view)
+        backend.execute("pass")
+        assert backend.executor.wait_for_idle(timeout=2)
+
+        view.raise_on.clear()
+        assert backend.execute("print('recovered')").output.strip() == "recovered"
+
+    def test_a_failed_commit_is_not_reported_as_success(self, config):
+        from conftest import FakeBinaryView
+
+        backend = self._backend(config, FakeBinaryView("t", raise_on=("commit",)))
+        result = backend.execute("bv.rename('x')")
+        assert not result.success
+        assert "commit" in (result.error or "")
+
+    def test_a_failed_revert_says_so_rather_than_claiming_a_rollback(self, config):
+        from conftest import FakeBinaryView
+
+        backend = self._backend(config, FakeBinaryView("t", raise_on=("revert",)))
+        result = backend.execute("raise ValueError('boom')")
+        assert not result.success
+        assert "revert" in (result.error or "")
+        assert "inconsistent" in (result.error or "")
 
 
 class TestModuleGlobal:
@@ -102,7 +210,7 @@ class TestModuleGlobal:
 
 class TestStatus:
     def test_describes_the_binary(self, backend):
-        binary = backend.status()["binary"]
+        binary = backend.status()["binaries"][0]
         assert binary["name"] == "target"
         assert binary["arch"] == "aarch64"
         assert binary["functions"] == 3
@@ -116,36 +224,11 @@ class TestStatus:
 
         tabs = [BinaryTab(0, "broken", "", Hostile())]
         backend = PluginBackend(config, tabs_provider=lambda: tabs)
-        assert backend.status()["binary"]["name"] == "broken"
+        assert backend.status()["binaries"][0]["name"] == "broken"
 
     def test_no_binary_open(self, config):
         backend = PluginBackend(config, tabs_provider=list)
-        status = backend.status()
-        assert status["binary"] is None
-        assert status["tabs"] == []
-
-
-class TestStaleTargetRecovery:
-    """Reopening a file is exactly when a model calls binja_guide, so the
-    orientation path must recover a closed target, not just execute()."""
-
-    def _reopened(self, config, bv):
-        other = type(bv)("reopened")
-        open_tabs = [[BinaryTab(0, "target", "/bin/target", bv)]]
-        backend = PluginBackend(config, tabs_provider=lambda: open_tabs[0])
-        backend.execute("pass")  # pins "target"
-        open_tabs[0] = [BinaryTab(0, "reopened", "/bin/reopened", other)]
-        return backend
-
-    def test_status_does_not_claim_nothing_is_open(self, config, bv):
-        status = self._reopened(config, bv).status()
-        assert status["binary"] is not None
-        assert status["binary"]["name"] == "reopened"
-
-    def test_the_guide_header_agrees_with_its_own_tab_list(self, config, bv):
-        header = self._reopened(config, bv).guide(None)
-        assert "No binary is open" not in header
-        assert "(selected)" in header
+        assert backend.status()["binaries"] == []
 
 
 class TestGuide:
@@ -154,62 +237,6 @@ class TestGuide:
 
     def test_topic_narrows_the_output(self, backend):
         assert len(backend.guide("Types")) < len(backend.guide(None))
-
-
-class TestTargetSwitchNotice:
-    """Closing the pinned tab re-pins, and whichever call arrives first
-    consumes that. When it is `binja_guide` — which is exactly what the guide
-    tells a model to do after a tab closes — the notice was thrown away and the
-    next script wrote to a database nobody chose, silently.
-    """
-
-    def _pin_then_close(self, config, bv):
-        other = type(bv)("other")
-        open_tabs = [
-            [
-                BinaryTab(0, "target", "/bin/target", bv),
-                BinaryTab(1, "other", "/bin/other", other),
-            ]
-        ]
-        backend = PluginBackend(config, tabs_provider=lambda: open_tabs[0])
-        backend.execute('h.select("other")')
-        open_tabs[0] = [BinaryTab(0, "target", "/bin/target", bv)]
-        return backend
-
-    def test_the_guide_header_reports_the_switch(self, config, bv):
-        header = self._pin_then_close(config, bv).guide(None)
-        assert "no longer open" in header
-        assert "other" in header
-
-    def test_a_script_after_a_guide_call_is_still_refused_once(self, config, bv):
-        backend = self._pin_then_close(config, bv)
-        backend.guide(None)
-        result = backend.execute("bv.rename('should_not_land')")
-        assert not result.success
-        assert "no longer open" in (result.error or "")
-        assert bv.renames == []
-
-    def test_the_notice_is_delivered_once_not_forever(self, config, bv):
-        backend = self._pin_then_close(config, bv)
-        backend.guide(None)
-        backend.execute("pass")
-        result = backend.execute("bv.rename('lands')")
-        assert result.success
-        assert bv.renames == ["lands"]
-
-    def test_the_direct_path_does_not_report_it_twice(self, config, bv):
-        backend = self._pin_then_close(config, bv)
-        assert not backend.execute("bv.rename('a')").success
-        assert backend.execute("bv.rename('b')").success
-        assert bv.renames == ["b"]
-
-    def test_an_untouched_session_reports_no_switch(self, config, bv):
-        backend = PluginBackend(
-            config, tabs_provider=lambda: [BinaryTab(0, "target", "/bin/target", bv)]
-        )
-        backend.execute("pass")
-        assert "no longer open" not in backend.guide(None)
-        assert backend.execute("bv.rename('fine')").success
 
 
 class TestLibrary:
@@ -227,22 +254,6 @@ class TestLibrary:
         ]
         return PluginBackend(config, tabs_provider=lambda: tabs)
 
-    def test_a_saved_function_sees_the_binary_selected_now(self, config, bv):
-        """The whole design. A stored function resolves globals from the call
-        that defined it, so without rebinding on retrieval this runs against
-        the first call's `bv` forever — the staleness it exists to remove."""
-        backend = self._two_binaries(config, bv)
-        backend.execute(
-            'def where():\n    return bv.file.filename\nh.lib["where"] = where'
-        )
-
-        first = backend.execute("print(h.lib.where())")
-        backend.execute('h.select("other")')
-        second = backend.execute("print(h.lib.where())")
-
-        assert first.output.strip() == "/bin/target"
-        assert second.output.strip() == "/bin/other"
-
     def test_a_saved_function_prints_into_the_running_script(self, backend):
         """Its `print` must be this call's, not the closed budget of the call
         that defined it — where the output would vanish silently."""
@@ -251,35 +262,56 @@ class TestLibrary:
         )
         assert "from the library" in backend.execute("h.lib.shout()").output
 
-    def test_select_inside_a_saved_function_rebinds_its_own_bv(self, config, bv):
-        """The guide's own cross-database example calls h.select() *inside* the
-        saved function. Each retrieval gets its own globals dict, so a select
-        that only wrote to the calling script's scope left the function reading
-        the binary it started on — and the read half of a port then returns an
-        empty result the caller has no reason to distrust."""
-        backend = self._two_binaries(config, bv)
+    def test_a_captured_helper_follows_the_calling_targets_view(self, config, bv):
+        """A sibling function carries its own __globals__ — the defining call's
+        scope, with that call's bv. Left alone it writes to the binary the
+        library was written against, outside any transaction, and reports
+        success. The one remaining way a write could escape its target."""
+        other = type(bv)("other")
+        tabs = [
+            BinaryTab(0, "target", "/bin/target", bv),
+            BinaryTab(1, "other", "/bin/other", other),
+        ]
+        backend = PluginBackend(config, tabs_provider=lambda: tabs)
         backend.execute(
-            "def where():\n"
-            '    h.select("other")\n'
+            "def helper():\n"
+            "    bv.rename('by_helper')\n"
             "    return bv.file.filename\n"
-            'h.lib["where"] = where'
+            "def port():\n"
+            "    return helper()\n"
+            'h.lib["port"] = port',
+            "target",
         )
-        assert backend.execute("print(h.lib.where())").output.strip() == "/bin/other"
-
-    def test_select_inside_a_saved_function_also_moves_the_caller(self, config, bv):
-        """One selection per session, not one per scope: the script must not
-        carry on writing to the old binary after its helper switched."""
-        backend = self._two_binaries(config, bv)
-        backend.execute('def go():\n    h.select("other")\nh.lib["go"] = go')
-        result = backend.execute("h.lib.go()\nprint(bv.file.filename)")
+        result = backend.execute("print(h.lib.port())", "other")
         assert result.output.strip() == "/bin/other"
+        assert other.renames == ["by_helper"]
+        assert bv.renames == [], "the write must not land in the defining binary"
 
-    def test_repeated_retrieval_does_not_accumulate_scopes(self, backend):
-        """A loop calling a saved function is ordinary; one globals dict per
-        call would grow without bound inside a single script."""
-        backend.execute('def noop():\n    return 1\nh.lib["noop"] = noop')
-        backend.execute("for _ in range(50):\n    h.lib.noop()")
-        assert len(backend.helpers.lib._bound) <= 1
+    def test_captured_helpers_can_still_call_each_other(self, backend):
+        """They share one globals dict, so rebinding must not strand them."""
+        result = backend.execute(
+            "def a():\n    return 'a' + b()\n"
+            "def b():\n    return 'b'\n"
+            'h.lib["a"] = a\nprint(h.lib.a())'
+        )
+        assert result.output.strip() == "ab"
+
+    def test_redefining_an_entry_mid_script_takes_effect(self, backend):
+        """A per-entry globals cache made the first definition win, so fixing a
+        saved function and re-testing it in one call silently ran the old one."""
+        result = backend.execute(
+            "A = 1\ndef f():\n    return A\n"
+            'h.lib["f"] = f\nprint(h.lib.f())\n'
+            "A = 2\ndef f2():\n    return A\n"
+            'h.lib["f"] = f2\nprint(h.lib.f())'
+        )
+        assert result.output.split() == ["1", "2"]
+
+    def test_the_live_globals_are_not_captured(self, backend):
+        """Capturing bv would pin the defining call's view for the session."""
+        backend.execute('def where():\n    return bv\nh.lib["where"] = where')
+        captured = backend.helpers.lib._entries["where"].captured
+        assert "bv" not in captured and "print" not in captured
 
     def test_saved_functions_call_each_other_through_lib(self, backend):
         backend.execute('def base():\n    return 6\nh.lib["base"] = base')
@@ -527,15 +559,3 @@ class TestStatusReport:
 
     def test_running_with_no_binary_open_says_so(self):
         assert "No binaries are open." in render_status_report("e", "k", [])
-
-    def test_marks_the_selected_binary(self):
-        out = render_status_report(
-            "e",
-            "k",
-            [
-                {"index": 0, "name": "ls", "selected": False},
-                {"index": 1, "name": "libfoo", "selected": True},
-            ],
-        )
-        assert "  * [1] libfoo" in out
-        assert "    [0] ls" in out

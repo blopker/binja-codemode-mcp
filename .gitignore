@@ -6,3 +6,8 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 scratch/
+
+# Working docs for the in-flight rewrite. Their reasoning moves into code
+# comments as it lands; delete these and this block when the work is done.
+findings.md
+design-view-access.md

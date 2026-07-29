@@ -10,23 +10,29 @@ from binja_codemode_mcp.plugin.guide import (
     topics,
 )
 
-FULL_STATUS: dict[str, Any] = {
-    "binja_version": "5.3.9757",
-    "binary": {
-        "name": "ls",
+
+def _binary(name: str, functions: int = 1284) -> dict[str, Any]:
+    return {
+        "name": name,
+        "path": f"/bin/{name}",
         "view_type": "Mach-O",
         "arch": "aarch64",
         "platform": "macos-aarch64",
-        "functions": 1284,
+        "functions": functions,
         "start": "0x100000000",
         "end": "0x100004000",
         "entry": "0x100001000",
         "analysis": "complete",
-    },
-    "tabs": [
-        {"index": 0, "name": "ls", "path": "/bin/ls", "selected": True},
-        {"index": 1, "name": "libfoo", "path": "/lib/libfoo", "selected": False},
-    ],
+    }
+
+
+FULL_STATUS: dict[str, Any] = {
+    "binja_version": "5.3.9757",
+    "binaries": [_binary("ls"), _binary("libfoo", 42)],
+}
+ONE_BINARY: dict[str, Any] = {
+    "binja_version": "5.3.9757",
+    "binaries": [_binary("ls")],
 }
 
 
@@ -40,18 +46,22 @@ class TestHeader:
     def test_points_at_the_matching_docs_version(self):
         assert "api.binary.ninja (5.3)" in render_header(FULL_STATUS)
 
-    def test_lists_tabs_and_flags_the_selected_one(self):
+    def test_describes_every_open_binary(self):
+        """The model picks a target per call, so the name it needs and the facts
+        it would otherwise ask for belong together."""
         header = render_header(FULL_STATUS)
-        assert "[0] ls (selected)" in header
-        assert "[1] libfoo" in header
+        assert '"ls"' in header and '"libfoo"' in header
+        assert "42 functions" in header
 
-    def test_explains_selection_only_when_it_matters(self):
-        assert "h.select" in render_header(FULL_STATUS)
-        one_tab = {**FULL_STATUS, "tabs": FULL_STATUS["tabs"][:1]}
-        assert "h.select" not in render_header(one_tab)
+    def test_demands_a_target_only_when_more_than_one_is_open(self):
+        assert "`target`" in render_header(FULL_STATUS)
+        assert "`target`" not in render_header(ONE_BINARY)
+
+    def test_points_at_the_read_only_helper_when_it_applies(self):
+        assert "h.read_only_view" in render_header(FULL_STATUS)
 
     def test_no_binary_open_says_so(self):
-        assert "No binary is open" in render_header({"binary": None, "tabs": []})
+        assert "No binary is open" in render_header({"binaries": []})
 
     def test_tolerates_a_sparse_status(self):
         assert render_header({}) != ""
@@ -211,8 +221,12 @@ class TestGuideContent:
         assert "There is no sandbox" in text
         assert "original_filename" in text
 
-    def test_says_select_rebinds_bv_immediately(self):
-        assert "rebinds `bv` immediately" in guide_text()
+    def test_says_the_target_is_the_only_writable_view(self):
+        """The one rule the whole two-database story rests on: a write that is
+        not to `bv` is not in a transaction."""
+        text = guide_text()
+        assert "only view you can write to" in text
+        assert "h.read_only_view" in text
 
     def test_carries_no_project_specific_leftovers(self):
         """Guidance must generalise: no target-specific names, no dead API."""

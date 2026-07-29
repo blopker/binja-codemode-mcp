@@ -1,6 +1,7 @@
 """Execution contract: scoping, transactions, globals, output, errors."""
 
 import textwrap
+import time
 
 import pytest
 
@@ -8,6 +9,7 @@ from binja_codemode_mcp.plugin.executor import (
     KEEP_SOURCES,
     SCRIPT_PREFIX,
     CodeExecutor,
+    ExecutionResult,
 )
 
 
@@ -15,7 +17,11 @@ from binja_codemode_mcp.plugin.executor import (
 def run(bv):
     """Execute a dedented snippet against the fake BinaryView."""
     executor = CodeExecutor()
-    return lambda src, **kw: executor.execute(textwrap.dedent(src).strip(), bv=bv, **kw)
+
+    def go(src, **kw):
+        return executor.execute(textwrap.dedent(src).strip(), target=bv, **kw)
+
+    return go
 
 
 class TestScoping:
@@ -101,7 +107,10 @@ class TestTimeout:
         gate = threading.Event()
         executor = CodeExecutor(timeout=0.05)
         result = executor.execute(
-            "bv.rename('late')\ngate.wait(5)", bv=bv, helpers=None, extra={"gate": gate}
+            "bv.rename('late')\ngate.wait(5)",
+            target=bv,
+            helpers=None,
+            extra={"gate": gate},
         )
         assert result.timed_out
         gate.set()
@@ -116,12 +125,167 @@ class TestTimeout:
         import threading
 
         gate = threading.Event()
-        executor = CodeExecutor(timeout=0.05)
-        executor.execute("gate.wait(5)", bv=bv, extra={"gate": gate})
+        executor = CodeExecutor(timeout=0.05, queue_wait=0.05)
+        executor.execute("gate.wait(5)", target=bv, extra={"gate": gate})
 
-        second = executor.execute("bv.rename('other')", bv=bv)
+        second = executor.execute("bv.rename('other')", target=bv)
         assert not second.success
         assert "still running" in (second.error or "")
+        assert bv.renames == []
+
+        gate.set()
+        executor.wait_for_idle(timeout=5)
+
+
+class TestSettleContract:
+    """The parts of settling that decide whether a call told the truth."""
+
+    def test_a_late_commit_is_not_reported_as_discarded(self, bv):
+        """join() returns only at full thread exit, which is after the commit.
+        Reading thread liveness instead of an explicit settled flag reported a
+        script whose commit ran past the deadline as discarded — so the model
+        re-ran it and applied everything twice."""
+        import threading
+
+        slow = threading.Event()
+
+        class SlowCommit(type(bv)):
+            def commit_undo_actions(self, state):
+                slow.wait(5)
+                super().commit_undo_actions(state)
+
+        view = SlowCommit("slow")
+        executor = CodeExecutor(timeout=0.2)
+        result = executor.execute("bv.rename('landed')", target=view)
+        assert result.timed_out, "the commit outran the deadline"
+        # A commit in flight cannot be called back, so the report must not
+        # promise a rollback that is not going to happen.
+        assert "still closing its transaction" in (result.error or "")
+        assert "reverted" not in (result.error or "")
+        slow.set()
+        executor.wait_for_idle(timeout=5)
+        assert view.committed == 1
+
+    def test_the_timeout_result_carries_the_budget(self, bv):
+        """The footer's whole job is sizing the next batch; the timeout is the
+        one result where that matters most."""
+        import threading
+
+        gate = threading.Event()
+        executor = CodeExecutor(timeout=0.1)
+        result = executor.execute("gate.wait(5)", target=bv, extra={"gate": gate})
+        assert result.timed_out
+        assert result.timeout_s == 0.1
+        assert result.elapsed_s > 0
+        gate.set()
+        executor.wait_for_idle(timeout=5)
+
+    def test_a_failure_while_preparing_hands_the_lock_back(self, bv):
+        """Anything between acquiring the lock and the worker's finally is
+        unprotected; a leak there refuses every later call for the process."""
+
+        def explode(scope, batch):
+            raise RuntimeError("wiring failed")
+
+        executor = CodeExecutor()
+        result = executor.execute("pass", target=bv, on_call=explode)
+        assert not result.success
+        assert "prepare" in (result.error or "")
+        assert executor.wait_for_idle(timeout=2)
+        assert executor.execute("print('after')", target=bv).output.strip() == "after"
+
+    def test_a_write_detector_that_raises_is_assumed_to_have_written(self, bv):
+        """Fail safe: an unreadable detector must undo the view rather than
+        wave it through, since the alternative leaves a write unprotected."""
+
+        def broken(view):
+            def boom():
+                raise RuntimeError("detector died")
+
+            return (boom, lambda: None)
+
+        other = type(bv)("other")
+        executor = CodeExecutor()
+
+        def wire(scope, batch):
+            batch.open_read_only(other, "other")
+
+        result = executor.execute(
+            "pass", target=bv, on_call=wire, watcher_factory=broken
+        )
+        assert not result.success
+        assert "read-only" in (result.error or "")
+        assert other.reverted == 1
+
+    def test_a_watcher_release_that_raises_does_not_break_the_verdict(self, bv):
+        def leaky(view):
+            def release():
+                raise RuntimeError("unregister failed")
+
+            return (lambda: False, release)
+
+        other = type(bv)("other")
+        executor = CodeExecutor()
+
+        def wire(scope, batch):
+            batch.open_read_only(other, "other")
+
+        result = executor.execute(
+            "pass", target=bv, on_call=wire, watcher_factory=leaky
+        )
+        assert result.success
+        assert other.committed == 1
+
+
+class TestQueueing:
+    """Clients issue tool calls in parallel; a collision that resolves itself
+    should not become a failure the model has to reason about."""
+
+    def test_a_brief_collision_waits_and_then_runs(self, bv):
+        import threading
+
+        executor = CodeExecutor(queue_wait=5.0)
+        results: dict[str, ExecutionResult] = {}
+
+        def first():
+            results["first"] = executor.execute(
+                "import time\ntime.sleep(0.15)\nbv.rename('first')", target=bv
+            )
+
+        def second():
+            time.sleep(0.05)  # arrives while the first still holds the lock
+            results["second"] = executor.execute("bv.rename('second')", target=bv)
+
+        threads = [threading.Thread(target=f) for f in (first, second)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(10)
+
+        assert results["first"].success
+        assert results["second"].success, (
+            "the second call should have queued, not been refused"
+        )
+        assert bv.renames == ["first", "second"]
+
+    def test_a_script_that_outlasts_the_queue_is_refused_with_its_target(self, bv):
+        """Past the wait it is genuinely long-running, and naming the target
+        lets the model tell whether the conflict even concerned its work."""
+        import threading
+
+        gate = threading.Event()
+        executor = CodeExecutor(timeout=5.0, queue_wait=0.05)
+        threading.Thread(
+            target=lambda: executor.execute(
+                "gate.wait(3)", target=bv, target_name="ls-a", extra={"gate": gate}
+            ),
+            daemon=True,
+        ).start()
+        time.sleep(0.1)
+
+        refused = executor.execute("bv.rename('nope')", target=bv, target_name="ls-b")
+        assert not refused.success
+        assert "still running on ls-a" in (refused.error or "")
         assert bv.renames == []
 
         gate.set()
@@ -155,10 +319,10 @@ class TestGlobals:
         assert bv.reverted == 1
 
     def test_no_binary_selected_is_a_clear_error(self):
-        result = CodeExecutor().execute("print(1)", bv=None)
+        result = CodeExecutor().execute("print(1)", target=None)
         assert not result.success
-        assert "No binary selected" in (result.error or "")
-        assert "h.select" in (result.error or "")
+        assert "No binary to work on" in (result.error or "")
+        assert "h.binaries()" in (result.error or "")
 
 
 class TestOutput:
@@ -170,14 +334,14 @@ class TestOutput:
 
     def test_output_is_truncated_at_the_cap(self, bv):
         executor = CodeExecutor(max_output_bytes=100)
-        result = executor.execute("print('x' * 500)", bv=bv)
+        result = executor.execute("print('x' * 500)", target=bv)
         assert len(result.output) < 500
         assert "truncated" in result.output
 
     def test_the_cap_counts_bytes_not_characters(self, bv):
         """A binary full of CJK strings would otherwise return ~4x the cap."""
         executor = CodeExecutor(max_output_bytes=400)
-        result = executor.execute("print('\u6f22' * 1000)", bv=bv)
+        result = executor.execute("print('\u6f22' * 1000)", target=bv)
         assert len(result.output.encode()) < 1200
 
     def test_a_runaway_printer_stops_accumulating(self, bv):
@@ -189,7 +353,7 @@ class TestOutput:
         executor = CodeExecutor(max_output_bytes=1000, timeout=0.2)
         result = executor.execute(
             "while not stop.is_set():\n    print('x' * 256)",
-            bv=bv,
+            target=bv,
             extra={"stop": stop},
         )
         assert result.timed_out
@@ -245,13 +409,13 @@ class TestErrors:
         import threading
 
         gate = threading.Event()
-        executor = CodeExecutor(timeout=0.05)
-        running = executor.execute("gate.wait(5)", bv=bv, extra={"gate": gate})
+        executor = CodeExecutor(timeout=0.05, queue_wait=0.0)
+        running = executor.execute("gate.wait(5)", target=bv, extra={"gate": gate})
         assert running.timed_out
         mine = sorted(k for k in linecache.cache if k.startswith(SCRIPT_PREFIX))[-1]
 
         for i in range(KEEP_SOURCES * 3):
-            executor.execute(f"x = {i}", bv=bv)
+            executor.execute(f"x = {i}", target=bv)
 
         assert mine in linecache.cache
         gate.set()
@@ -264,7 +428,7 @@ class TestErrors:
 
         executor = CodeExecutor()
         for i in range(30):
-            executor.execute(f"x = {i}", bv=bv)
+            executor.execute(f"x = {i}", target=bv)
         held = [k for k in linecache.cache if k.startswith(SCRIPT_PREFIX)]
         assert len(held) <= 10
 
@@ -280,7 +444,7 @@ class TestErrors:
         gate = threading.Event()
         executor = CodeExecutor(timeout=0.1)
         result = executor.execute(
-            "print('started')\ngate.wait(5)", bv=bv, extra={"gate": gate}
+            "print('started')\ngate.wait(5)", target=bv, extra={"gate": gate}
         )
         assert result.timed_out
         assert not result.success

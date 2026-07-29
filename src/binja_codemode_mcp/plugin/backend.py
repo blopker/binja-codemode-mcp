@@ -1,7 +1,8 @@
 """Wires the session, executor, and guide into the MCP Backend protocol.
 
-`bv` is duck-typed throughout, so this is testable without Binary Ninja; only
-`_binja_version` and the module handed to scripts touch the real thing.
+Views are duck-typed throughout, so this is testable without Binary Ninja; only
+`_binja_version`, the module handed to scripts, and the read-only watcher touch
+the real thing, and all three degrade to None without it.
 """
 
 import inspect
@@ -13,7 +14,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..config import Config
-from .executor import SCRIPT_PREFIX, CodeExecutor, ExecutionResult
+from .executor import SCRIPT_PREFIX, Batch, CodeExecutor, ExecutionResult
 from .guide import render
 from .session import BinarySession, BinaryTab
 
@@ -67,26 +68,14 @@ class _Library:
     named `keys` or `items` would permanently shadow an entry of that name.
 
     Entries are functions, never values, so nothing stored can go stale: each
-    is rebound to the running script's scope on the way out, and re-derives
-    against whatever `bv` is live now.
+    is rebuilt against the running call's live globals on the way out.
     """
 
-    _INTERNAL = ("_scope", "_entries", "_bound")
+    _INTERNAL = ("_scope", "_entries")
 
     def __init__(self, scope: Callable[[], dict[str, Any] | None]) -> None:
         self._scope = scope
         self._entries: dict[str, _Saved] = {}
-        # Globals handed to saved functions during the running call, keyed by
-        # entry name so a loop reuses one dict instead of making fifty.
-        self._bound: dict[str, dict[str, Any]] = {}
-
-    def _begin_call(self) -> None:
-        self._bound.clear()
-
-    def _retarget(self, bv: Any) -> None:
-        """Point every scope this call handed out at a newly selected binary."""
-        for globals_ in self._bound.values():
-            globals_["bv"] = bv
 
     def __setitem__(self, key: str, fn: Any) -> None:
         if (
@@ -161,7 +150,7 @@ class _Library:
         return self._rebind(key, rec)
 
     def _rebind(self, key: str, rec: _Saved) -> Any:
-        """Rebuild the function against the running script's live globals.
+        """Rebuild the function against the running call's live globals.
 
         A function resolves globals from the call that defined it, so without
         this a saved function sees the first call's `bv` forever and its
@@ -169,15 +158,31 @@ class _Library:
         live globals come from the calling script — the rest of what the
         function sees is what it was defined with, so a name the caller happens
         to have bound cannot quietly change what a saved function means.
+
+        A fresh dict per retrieval, deliberately: caching one per entry made a
+        redefinition within the same script keep the previous definition's
+        globals, so fixing a saved function and re-testing it in one call
+        silently ran the old one.
         """
         scope = self._scope() or {}
-        # One globals dict per entry per call, refreshed rather than rebuilt:
-        # h.select() has to be able to find and retarget it, and a saved
-        # function that calls another must not strand either of them.
-        merged = self._bound.setdefault(key, dict(rec.captured))
+        merged = dict(rec.captured)
         merged.update({k: scope[k] for k in LIVE_GLOBALS if k in scope})
         if "__builtins__" in scope:
             merged["__builtins__"] = scope["__builtins__"]
+
+        # Rebind captured helper functions onto the same globals. A sibling
+        # defined alongside the saved one carries its own `__globals__` — the
+        # defining call's scope, including that call's `bv` — so calling it
+        # would write to the binary the library was written against rather than
+        # this call's target, outside any transaction and reported as success.
+        # They share `merged`, so helpers that call each other still resolve.
+        for name, value in list(merged.items()):
+            if not isinstance(value, types.FunctionType):
+                continue
+            if value.__code__.co_filename.startswith(SCRIPT_PREFIX):
+                merged[name] = types.FunctionType(
+                    value.__code__, merged, name, value.__defaults__, value.__closure__
+                )
 
         fn = types.FunctionType(rec.code, merged, key, rec.defaults, None)
         fn.__kwdefaults__ = rec.kwdefaults
@@ -222,8 +227,8 @@ class _Library:
 
     def __delattr__(self, key: str) -> None:
         if key.startswith("_"):
-            # Never object.__delattr__: dropping _entries wedges every later
-            # call, including ones that never touch the library.
+            # Never object.__delattr__: dropping _entries would break every
+            # later use of the library.
             raise AttributeError(
                 f"{key} belongs to h.lib itself and cannot be deleted."
             )
@@ -276,6 +281,8 @@ class Helpers:
     def __init__(self, session: BinarySession) -> None:
         self._session = session
         self._scope: dict[str, Any] | None = None
+        self._batch: Batch | None = None
+        self._target: BinaryTab | None = None
         self.lib = _Library(lambda: self._scope)
 
     def __setattr__(self, name: str, value: Any) -> None:
@@ -286,11 +293,11 @@ class Helpers:
             )
         object.__setattr__(self, name, value)
 
-    def bind_scope(self, scope: dict[str, Any]) -> None:
-        """Called by the executor before a script runs, so select() can rebind
-        `bv` for the remainder of that script."""
+    def bind_call(self, scope: dict[str, Any], batch: Batch, target: BinaryTab) -> None:
+        """Called by the executor before a script runs."""
         self._scope = scope
-        self.lib._begin_call()
+        self._batch = batch
+        self._target = target
 
     def lib_sources(self) -> str:
         """Every saved definition as text, to carry a library to a new session.
@@ -301,29 +308,122 @@ class Helpers:
         return self.lib._sources()
 
     def binaries(self) -> list[dict[str, Any]]:
-        """Open binaries, as dicts with index, name, path and selected flag."""
+        """Open binaries, as dicts with index, name and path."""
         return self._session.describe()
 
-    def select(self, key: int | str) -> dict[str, Any]:
-        """Choose which open binary to work on, by tab index or name.
+    def read_only_view(self, key: str) -> Any:
+        """Another open binary, to read from.
 
-        Takes effect immediately: `bv` is rebound for the rest of this script.
+        The name is the point: it is read at every call site, which is more
+        often than any guide. Reads are safe; a write through this view is
+        detected and rolled back, and fails the call. Only the `target` named in
+        the tool call is writable, and only it is covered by a transaction that
+        commits.
         """
-        tab = self._session.select(key)
-        if self._scope is not None:
-            self._scope["bv"] = tab.bv
-        # And every saved function's scope. A library function that selects
-        # internally — the shape the guide's own cross-database example uses —
-        # would otherwise keep reading the binary the call started on and
-        # return an empty result rather than an error.
-        self.lib._retarget(tab.bv)
-        return {"index": tab.index, "name": tab.name, "path": tab.path}
+        tab = self._session.resolve(key)
+        if self._target is not None and tab.name == self._target.name:
+            raise ValueError(
+                f"{tab.name!r} is this call's target — use `bv` to write to it. "
+                "h.read_only_view is for the other binary."
+            )
+        if self._batch is not None and not self._batch.holds(tab.bv):
+            self._batch.open_read_only(tab.bv, tab.name)
+        return tab.bv
 
     def __repr__(self) -> str:
         return (
-            "<binja mcp helpers: h.binaries(), h.select(index_or_name), "
+            "<binja mcp helpers: h.binaries(), h.read_only_view(name), "
             "h.lib, h.lib_sources()>"
         )
+
+
+# Mutations a script can make that mean "this view was written to". Deliberately
+# excludes FunctionUpdated: analysis fires it on its own, so a read-only view
+# would accuse a script that only read from it. A false negative leaves a stray
+# write committed, which is what happened before any of this existed; a false
+# positive fails a legitimate call, which is worse.
+_WRITE_NOTIFICATIONS = (
+    "DataWritten",
+    "DataInserted",
+    "DataRemoved",
+    "FunctionAdded",
+    "FunctionRemoved",
+    "DataVariableAdded",
+    "DataVariableRemoved",
+    "DataVariableUpdated",
+    "SymbolAdded",
+    "SymbolRemoved",
+    "SymbolUpdated",
+    "TypeDefined",
+    "TypeUndefined",
+    "TagAdded",
+    "TagRemoved",
+    "TagUpdated",
+)
+
+
+def make_watcher_factory(bn: Any) -> Callable[[Any], Any] | None:
+    """Build the read-only write detector, or None without Binary Ninja.
+
+    Returns a callable that takes a view and returns `(was_written, release)`.
+    The callback is synchronous and fires on the thread that made the change, so
+    the flag is reliably set before the script's write returns.
+    """
+    if bn is None:
+        return None
+    try:
+        notification_cls = bn.BinaryDataNotification
+        types_enum = bn.NotificationType
+    except AttributeError:
+        return None
+
+    flags = 0
+    for name in _WRITE_NOTIFICATIONS:
+        flag = getattr(types_enum, name, None)
+        if flag is not None:
+            flags |= int(flag)
+    if not flags:
+        return None
+
+    def factory(view: Any) -> Any:
+        seen = {"written": False}
+
+        def mark(*_args: Any, **_kwargs: Any) -> None:
+            seen["written"] = True
+
+        members = {"__init__": lambda self: notification_cls.__init__(self, flags)}
+        for hook in (
+            "data_written",
+            "data_inserted",
+            "data_removed",
+            "function_added",
+            "function_removed",
+            "data_var_added",
+            "data_var_removed",
+            "data_var_updated",
+            "symbol_added",
+            "symbol_removed",
+            "symbol_updated",
+            "type_defined",
+            "type_undefined",
+            "tag_added",
+            "tag_removed",
+            "tag_updated",
+        ):
+            members[hook] = mark
+        watcher = type("_ReadOnlyWatch", (notification_cls,), members)()
+
+        try:
+            view.register_notification(watcher)
+        except Exception:
+            return None
+
+        def release() -> None:
+            view.unregister_notification(watcher)
+
+        return (lambda: seen["written"], release)
+
+    return factory
 
 
 class PluginBackend:
@@ -334,6 +434,7 @@ class PluginBackend:
         config: Config,
         tabs_provider: Callable[[], list[BinaryTab]],
         bn_module: Any = None,
+        watcher_factory: Callable[[Any], Any] | None = None,
     ) -> None:
         self.config = config
         self.session = BinarySession(tabs_provider)
@@ -341,11 +442,17 @@ class PluginBackend:
         self.executor = CodeExecutor(
             max_output_bytes=config.max_output_bytes,
             timeout=config.execution_timeout_s,
+            queue_wait=config.queue_wait_s,
         )
         self._bn = bn_module
+        self._watcher_factory = (
+            watcher_factory
+            if watcher_factory is not None
+            else make_watcher_factory(bn_module)
+        )
 
-    def execute(self, code: str) -> ExecutionResult:
-        result = self._execute(code)
+    def execute(self, code: str, target: Any = None) -> ExecutionResult:
+        result = self._execute(code, target)
         # Every result carries the library, including the failures: a script
         # that saved a function and then raised keeps the definition, and the
         # footer is the only place either side can see that. Never at the cost
@@ -357,85 +464,41 @@ class PluginBackend:
             result.lib = ()
         return result
 
-    def _execute(self, code: str) -> ExecutionResult:
+    def _execute(self, code: str, target: Any) -> ExecutionResult:
         try:
-            tab = self.session.current()
+            tab = self.session.resolve(target)
         except LookupError as e:
-            # The pinned binary was closed. Re-pin so the session is usable
-            # again rather than dead: the script never runs when current()
-            # raises, so telling the model to call h.select() would be advice
-            # it cannot act on.
-            tab = self.session.repin()
-            if tab is None:
-                return ExecutionResult(success=False, output="", error=str(e))
-            self.session.take_switch()  # this message is the notice
-            return ExecutionResult(
-                success=False,
-                output="",
-                error=(
-                    f"{e} Selected [{tab.index}] {tab.name} instead — "
-                    "re-run your script, or call h.select() to choose another."
-                ),
-            )
+            return ExecutionResult(success=False, output="", error=str(e))
 
-        # A guide call re-pins too, and used to consume the switch on the way
-        # past — leaving the next script to run against a database nobody chose,
-        # with nothing in the response to say so. Refuse once, exactly as the
-        # direct path does, so the caller that is about to write is the one told.
-        switch = self.session.take_switch()
-        if switch is not None:
-            dropped, now = switch
-            return ExecutionResult(
-                success=False,
-                output="",
-                error=(
-                    f"The selected binary ({dropped}) is no longer open. "
-                    f"Selected [{now.index}] {now.name} instead — re-run your "
-                    "script, or call h.select() to choose another."
-                ),
-            )
+        def on_call(scope: dict[str, Any], batch: Batch) -> None:
+            self.helpers.bind_call(scope, batch, tab)
 
         # Nothing here touches the UI. Changes recorded in the undo state
         # propagate to the view on their own, and driving a refresh from this
         # thread pulled Binary Ninja to the foreground mid-session.
         return self.executor.execute(
             code,
-            bv=tab.bv if tab else None,
+            target=tab.bv,
+            target_name=tab.name,
             bn=self._bn,
             helpers=self.helpers,
-            on_scope=self.helpers.bind_scope,
+            on_call=on_call,
+            watcher_factory=self._watcher_factory,
         )
 
     def guide(self, topic: str | None) -> str:
         return render(self.status(), topic)
 
     def status(self) -> dict[str, Any]:
-        # current() before describe(): the first call is what pins a binary, and
-        # describing first would report nothing selected on a fresh session.
         try:
-            tab = self.session.current()
-        except LookupError:
-            # Recover a stale pin here too, not just in execute(). This is the
-            # orientation call a model makes right after reopening a file, and
-            # reporting "no binary is open" while listing an open tab is both
-            # self-contradictory and the worst possible moment to be wrong.
-            tab = self.session.repin()
-
-        try:
-            tabs = self.session.describe()
+            tabs = self.session.tabs()
         except LookupError:
             tabs = []
 
-        # Peeked, never taken: the header saying so does not excuse the next
-        # execute from saying so too.
-        switch = self.session.pending_switch()
-
         return {
             "binja_version": self._binja_version(),
-            "tabs": tabs,
-            "binary": _describe_binary(tab.bv, tab.name) if tab else None,
+            "binaries": [_describe_binary(t.bv, t.name, t.path) for t in tabs],
             "endpoint": self.config.endpoint,
-            "switched": {"from": switch[0], "to": switch[1].name} if switch else None,
         }
 
     def _binja_version(self) -> str | None:
@@ -450,9 +513,9 @@ class PluginBackend:
 def render_status_report(
     endpoint: str | None,
     api_key: str | None,
-    tabs: list[dict[str, Any]] | None,
+    binaries: list[dict[str, Any]] | None,
 ) -> str:
-    """The text behind Plugins > Code Mode MCP > Show Status.
+    """The text behind Plugins > Code Mode MCP > Show Status in Log.
 
     `endpoint` is None when the server is not running.
     """
@@ -475,18 +538,15 @@ def render_status_report(
         f'    --header "Authorization: Bearer {api_key}"',
         "",
     ]
-    if not tabs:
+    if not binaries:
         lines.append("No binaries are open.")
     else:
-        lines.append("Open binaries (* = selected):")
-        lines += [
-            f"  {'*' if tab['selected'] else ' '} [{tab['index']}] {tab['name']}"
-            for tab in tabs
-        ]
+        lines.append("Open binaries (name is what a call targets):")
+        lines += [f"  {b['name']}" for b in binaries]
     return "\n".join(lines)
 
 
-def _describe_binary(bv: Any, name: str) -> dict[str, Any]:
+def _describe_binary(bv: Any, name: str, path: str = "") -> dict[str, Any]:
     """Facts the model would otherwise waste a round trip discovering."""
 
     def safe(fn: Callable[[], Any], default: Any = None) -> Any:
@@ -498,7 +558,7 @@ def _describe_binary(bv: Any, name: str) -> dict[str, Any]:
     entry = safe(lambda: bv.entry_point)
     return {
         "name": name,
-        "path": safe(lambda: bv.file.filename, ""),
+        "path": path or safe(lambda: bv.file.filename, ""),
         "view_type": safe(lambda: bv.view_type, "?"),
         "arch": safe(lambda: bv.arch.name if bv.arch else None, "?"),
         "platform": safe(lambda: bv.platform.name if bv.platform else None, "?"),

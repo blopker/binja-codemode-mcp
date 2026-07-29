@@ -51,7 +51,7 @@ Then just ask:
 
 **Tools**
 
-- `execute` — run Python against the selected binary.
+- `execute` — run Python against a named binary, which is the only one it can write to.
 - `binja_guide` — live session state (which binary, architecture, analysis status, open
   tabs, Binary Ninja version) plus practical guidance on types, data variables, function
   prototypes, and the API calls that behave surprisingly.
@@ -62,7 +62,7 @@ Then just ask:
 |---|---|
 | `bv` | The real `BinaryView` |
 | `bn` | The `binaryninja` module |
-| `h` | `h.binaries()`, `h.select(index_or_name)`, `h.lib`, `h.lib_sources()` |
+| `h` | `h.binaries()`, `h.read_only_view(name)`, `h.lib`, `h.lib_sources()` |
 
 Guidance is delivered three ways, because clients surface each differently: the MCP
 `instructions` field (always in context), the tool descriptions, and the `binja_guide`
@@ -71,10 +71,15 @@ tool. Resources exist too, but nothing depends on them — in Claude Code a reso
 
 ## Multiple binaries
 
-Open as many as you like. The session pins one on first use and stays on it even when you
-click another tab, so a long analysis cannot retarget under the model's feet.
-`h.binaries()` lists them; `h.select(1)` or `h.select("libfoo")` switches. The guide
-header lists open tabs on every call.
+Open as many as you like. Every `execute` call names its `target` — the one binary it may
+write to — so a write can never land somewhere nobody chose. With a single binary open the
+parameter is optional; with more than one it is required, and omitting it is an error that
+lists the candidates.
+
+A second binary is read through `h.read_only_view("name")`, which returns the real
+`BinaryView`. Both are live in the same call, which is what a cross-database port needs:
+`Type` objects move between views directly and cannot survive to the next call. Writing
+through a read-only view is detected, rolled back, and fails the call.
 
 ## Configuration
 
@@ -124,9 +129,14 @@ globals from the call that defined it: it would see that call's `bv` forever, an
 saved on every result, so the library is the most visible thing in the session rather
 than the least.
 
-**Per-request binary resolution.** Capturing a `BinaryView` once means a second tab is
-unreachable and edits can land on a stale view. The target is resolved per request and
-pinned per session, so the model's target is stable but never wrong.
+**The target is a call parameter, not session state.** An earlier design pinned a target
+and let scripts rebind it mid-run, which put three sources of truth in play: the view the
+transaction was opened on, the view the script could see, and the pin deciding where the
+next call would start. They could disagree, and when they did a write landed outside any
+transaction. Naming the target in the call collapses all three — the transaction is opened
+on the view the script writes to, by construction — and leaves nothing to go stale, so a
+reopened file simply works. Names, never indices: indices follow tab order and change when
+tabs are dragged.
 
 **Three guidance layers**, because clients surface each differently. The `instructions`
 field is always in context; tool descriptions load when a tool is pulled in; `binja_guide`
@@ -207,7 +217,7 @@ checkpoint that needs a save, a tab close, and a look at the window.
 Read the report's E2 section first. Asking what the driver had to discover by trial and
 error is what produced most of `guide.md`, and it has repeatedly found things the suite
 could not: a failed script keeping its changes, a guide call swallowing a target switch,
-and `h.select` not reaching inside a saved function.
+and a write landing outside its transaction after a mid-script retarget.
 
 Treat a reported failure as a hypothesis. Two have turned out to be artifacts of how the
 run was conducted rather than defects, so measure before changing anything — both times

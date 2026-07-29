@@ -90,7 +90,7 @@ class BinjaCodeModeMCP:
             report = render_status_report(
                 self._config.endpoint,
                 self._config.api_key,
-                self._backend.status().get("tabs", []),
+                self._backend.status().get("binaries", []),
             )
         for line in report.splitlines():
             log_info(line)

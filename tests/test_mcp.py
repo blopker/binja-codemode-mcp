@@ -21,10 +21,12 @@ class FakeBackend:
     def __init__(self, result: ExecutionResult | None = None) -> None:
         self.result = result or ExecutionResult(success=True, output="ok\n")
         self.executed: list[str] = []
+        self.targets: list[Any] = []
         self.guide_topics: list[str | None] = []
 
-    def execute(self, code: str) -> ExecutionResult:
+    def execute(self, code: str, target: Any = None) -> ExecutionResult:
         self.executed.append(code)
+        self.targets.append(target)
         return self.result
 
     def guide(self, topic: str | None) -> str:
@@ -154,6 +156,27 @@ class TestTools:
         )
         assert "lib: zzz" in text
 
+    def test_the_target_reaches_the_backend(self, handler, backend):
+        """It decides which database is written to, so it must not be dropped
+        silently on the way through the protocol layer."""
+        call(
+            handler,
+            "tools/call",
+            name="execute",
+            arguments={"code": "pass", "target": "firmware-1.3"},
+        )
+        assert backend.targets == ["firmware-1.3"]
+
+    def test_a_non_string_target_is_rejected_before_running(self, handler, backend):
+        result = call(
+            handler,
+            "tools/call",
+            name="execute",
+            arguments={"code": "pass", "target": 1},
+        )["result"]
+        assert result["isError"] is True
+        assert backend.executed == []
+
     def test_execute_reports_failure_as_a_tool_error(self, handler):
         handler.backend.result = ExecutionResult(
             success=False, output="partial\n", error="ValueError: boom"
@@ -207,7 +230,7 @@ class TestErrors:
         assert call(handler, "wat/list")["error"]["code"] == -32601
 
     def test_backend_exception_becomes_an_internal_error(self, handler):
-        def boom(code: str) -> ExecutionResult:
+        def boom(code: str, target: Any = None) -> ExecutionResult:
             raise RuntimeError("backend died")
 
         handler.backend.execute = boom  # type: ignore[method-assign]
@@ -327,7 +350,7 @@ class TestResponseBudget:
         assert len(result["content"][0]["text"].encode()) <= MAX_RESULT_BYTES
 
     def test_an_internal_error_message_is_bounded(self, handler):
-        def boom(code: str):
+        def boom(code: str, target: Any = None):
             raise RuntimeError("x" * 200_000)
 
         handler.backend.execute = boom  # type: ignore[method-assign]

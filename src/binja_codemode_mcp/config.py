@@ -62,6 +62,12 @@ class Config:
     # inline — a cap that prevents a hang but not a lost answer.
     max_output_bytes: int = 32_000
     execution_timeout_s: float = 30.0
+    # How long a second call waits for the first rather than being refused.
+    # Clients issue tool calls in parallel, and the ordinary script finishes in
+    # well under a second, so a short queue turns a spurious failure into a
+    # brief wait. Past this, the script is genuinely long-running and saying so
+    # is more useful than blocking.
+    queue_wait_s: float = 5.0
 
     data_dir: Path = field(default_factory=default_data_dir)
 

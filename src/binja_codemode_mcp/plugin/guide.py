@@ -33,52 +33,43 @@ def topics(markdown: str) -> list[str]:
 
 
 def render_header(status: dict[str, Any]) -> str:
-    """One-screen orientation block describing the live session."""
+    """One-screen orientation block describing the live session.
+
+    Every open binary is described, not just one: the model chooses a `target`
+    per call, so the name it needs and the facts it would otherwise ask for
+    belong together.
+    """
     lines: list[str] = []
+    binaries = status.get("binaries") or []
 
-    switched = status.get("switched")
-    if switched:
-        # First line, before the binary it describes: the model is reading this
-        # precisely because something changed under it.
-        lines.append(
-            f"NOTE: {switched['from']} is no longer open — now selected: "
-            f"{switched['to']}. Your next script will be refused once so you "
-            "can confirm the target before writing."
-        )
-
-    binary = status.get("binary")
-    if binary:
-        lines.append(
-            f"Binary: {binary['name']} "
-            f"({binary.get('view_type', '?')}, {binary.get('arch', '?')}, "
-            f"{binary.get('platform', '?')}) — {binary.get('functions', 0):,} functions"
-        )
-        lines.append(f"Address range: {binary.get('start')} – {binary.get('end')}")
-        lines.append(
-            f"Analysis: {binary.get('analysis', 'unknown')}. "
-            f"Entry point: {binary.get('entry', 'none')}."
-        )
-    else:
+    if not binaries:
         lines.append("No binary is open in Binary Ninja.")
+    for binary in binaries:
+        name = binary["name"]
+        kind = (
+            f"{binary.get('view_type', '?')}, {binary.get('arch', '?')}, "
+            f"{binary.get('platform', '?')}"
+        )
+        counted = f"{binary.get('functions', 0):,} functions"
+        lines.append(
+            f'Binary "{name}" ({kind}) — {counted}, '
+            f"{binary.get('start')} – {binary.get('end')}, "
+            f"analysis {binary.get('analysis', 'unknown')}, "
+            f"entry {binary.get('entry', 'none')}"
+        )
 
     version = status.get("binja_version")
     if version:
         docs = ".".join(version.split(".")[:2])
         lines.append(f"Binary Ninja {version} — API docs: api.binary.ninja ({docs})")
 
-    tabs = status.get("tabs") or []
-    if tabs:
-        rendered = "  ".join(
-            f"[{t['index']}] {t['name']}" + (" (selected)" if t["selected"] else "")
-            for t in tabs
+    if len(binaries) > 1:
+        names = ", ".join(f'"{b["name"]}"' for b in binaries)
+        lines.append(
+            f"More than one binary is open, so every execute call must name its "
+            f"`target`: {names}. The target is the only view you can write to; "
+            "reach the other with h.read_only_view(name)."
         )
-        lines.append(f"Open tabs: {rendered}")
-        if len(tabs) > 1:
-            lines.append(
-                "Several binaries are open. The selection above is the target — not "
-                "necessarily the first one opened — and it stays put even if the user "
-                "switches tabs; use h.select(<index>) to change it."
-            )
 
     return "\n".join(lines)
 

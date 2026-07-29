@@ -104,8 +104,8 @@ def test_status_resource_reflects_the_live_session(client):
     client("initialize")
     response = client("resources/read", uri="binja://status")
     status = json.loads(response["result"]["contents"][0]["text"])
-    assert status["binary"]["name"] == "target"
-    assert status["tabs"][0]["selected"] is True
+    assert status["binaries"][0]["name"] == "target"
+    assert status["binaries"][0]["functions"] == 3
 
 
 def test_a_failing_script_with_an_enormous_message_stays_usable(client):

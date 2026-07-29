@@ -1,4 +1,4 @@
-"""Binary selection: which open binary a session targets, and when that changes."""
+"""Resolving a target name to exactly one open binary."""
 
 import pytest
 
@@ -7,82 +7,113 @@ from binja_codemode_mcp.plugin.session import (
     BinarySession,
     BinaryTab,
 )
+from conftest import FakeBinaryView
 
 
-def make_tabs(*names: str) -> list[BinaryTab]:
+def make_tabs(*specs: tuple[str, str]) -> list[BinaryTab]:
     return [
-        BinaryTab(index=i, name=n, path=f"/bin/{n}", bv=object())
-        for i, n in enumerate(names)
+        BinaryTab(index=i, name=name, path=path, bv=FakeBinaryView(name))
+        for i, (name, path) in enumerate(specs)
     ]
 
 
-class TestPinning:
-    def test_first_use_pins_the_first_open_binary(self):
-        tabs = make_tabs("ls", "cat")
-        session = BinarySession(lambda: tabs)
-        current = session.current()
-        assert current is not None and current.name == "ls"
+class TestResolve:
+    def test_a_single_open_binary_needs_no_target(self):
+        tabs = make_tabs(("ls", "/bin/ls"))
+        assert BinarySession(lambda: tabs).resolve().name == "ls"
 
-    def test_selection_survives_the_user_switching_tabs(self):
-        """A long analysis must not retarget under the model's feet."""
-        tabs = make_tabs("ls", "cat")
-        order = [tabs]
-        session = BinarySession(lambda: order[0])
-        session.select("cat")
+    def test_two_open_binaries_refuse_to_guess(self):
+        """Guessing would put a write in a database nobody chose, which is the
+        one failure the target parameter exists to make impossible."""
+        tabs = make_tabs(("ls-a", "/tmp/ls-a"), ("ls-b", "/tmp/ls-b"))
+        with pytest.raises(BinaryNotFoundError) as e:
+            BinarySession(lambda: tabs).resolve()
+        assert "`target` is required" in str(e.value)
 
-        # User reorders tabs in the UI; the pinned view is still `cat`.
-        order[0] = [
-            BinaryTab(index=0, name="cat", path="/bin/cat", bv=tabs[1].bv),
-            BinaryTab(index=1, name="ls", path="/bin/ls", bv=tabs[0].bv),
-        ]
-        current = session.current()
-        assert current is not None and current.name == "cat"
+    def test_the_refusal_names_the_candidates_and_shows_the_fix(self):
+        """It costs a round trip, so it has to be actionable in one read."""
+        tabs = make_tabs(("ls-a", "/tmp/ls-a"), ("ls-b", "/tmp/ls-b"))
+        with pytest.raises(BinaryNotFoundError) as e:
+            BinarySession(lambda: tabs).resolve()
+        message = str(e.value)
+        assert '"ls-a"' in message and '"ls-b"' in message
+        assert 'target="ls-a"' in message
 
-    def test_closing_the_pinned_binary_is_reported_not_papered_over(self):
-        tabs = make_tabs("ls", "cat")
-        order = [tabs]
-        session = BinarySession(lambda: order[0])
-        session.select("cat")
+    def test_resolve_by_name(self):
+        tabs = make_tabs(("ls-a", "/tmp/ls-a"), ("ls-b", "/tmp/ls-b"))
+        assert BinarySession(lambda: tabs).resolve("ls-b").name == "ls-b"
 
-        order[0] = [tabs[0]]
-        with pytest.raises(BinaryNotFoundError, match="no longer open"):
-            session.current()
+    def test_resolve_by_path_fragment(self):
+        tabs = make_tabs(("firmware", "/builds/v2/firmware.bin"))
+        assert BinarySession(lambda: tabs).resolve("v2").name == "firmware"
 
-    def test_no_open_binaries_returns_none(self):
-        assert BinarySession(list).current() is None
+    def test_an_index_is_refused_with_the_reason(self):
+        """Indices follow tab order, so dragging a tab silently retargets every
+        later call. Refusing teaches; resolving would be a time bomb."""
+        tabs = make_tabs(("ls-a", "/tmp/ls-a"), ("ls-b", "/tmp/ls-b"))
+        with pytest.raises(BinaryNotFoundError) as e:
+            BinarySession(lambda: tabs).resolve(1)
+        assert "not the index" in str(e.value)
+        assert "tab order" in str(e.value)
+
+    def test_an_ambiguous_name_lists_the_candidates(self):
+        tabs = make_tabs(("fw-1.2", "/b/fw-1.2"), ("fw-1.3", "/b/fw-1.3"))
+        with pytest.raises(BinaryNotFoundError) as e:
+            BinarySession(lambda: tabs).resolve("fw")
+        assert '"fw-1.2"' in str(e.value) and '"fw-1.3"' in str(e.value)
+
+    def test_an_unknown_name_lists_what_is_open(self):
+        tabs = make_tabs(("ls", "/bin/ls"))
+        with pytest.raises(BinaryNotFoundError) as e:
+            BinarySession(lambda: tabs).resolve("nope")
+        assert '"ls"' in str(e.value)
+
+    def test_nothing_open_says_so(self):
+        with pytest.raises(BinaryNotFoundError) as e:
+            BinarySession(list).resolve()
+        assert "No binaries are open" in str(e.value)
+
+    def test_a_reopened_file_just_works(self):
+        """Nothing is cached between calls, so the dead-handle problem a pinned
+        target used to have cannot arise."""
+        open_tabs = [make_tabs(("ls", "/bin/ls"))]
+        session = BinarySession(lambda: open_tabs[0])
+        assert session.resolve("ls").name == "ls"
+        open_tabs[0] = make_tabs(("ls", "/bin/ls"))  # closed and reopened
+        assert session.resolve("ls").name == "ls"
 
 
-class TestSelect:
-    def test_select_by_index(self):
-        session = BinarySession(lambda: make_tabs("ls", "cat"))
-        assert session.select(1).name == "cat"
+class TestViewType:
+    """A tab shows one view at a time and the user can switch it."""
 
-    def test_select_by_partial_name(self):
-        session = BinarySession(lambda: make_tabs("ls", "libfoo.dylib"))
-        assert session.select("libfoo").name == "libfoo.dylib"
+    def test_a_raw_tab_resolves_to_the_analysed_view(self):
+        """Otherwise a stray click in the GUI hands the model a database with no
+        functions, which reads as an empty binary rather than the wrong view."""
+        raw = FakeBinaryView("ls", functions=0, view_type="Raw")
+        macho = raw.add_view(FakeBinaryView("ls", functions=133, view_type="Mach-O"))
+        tabs = [BinaryTab(index=0, name="ls", path="/bin/ls", bv=raw)]
 
-    def test_ambiguous_name_lists_the_candidates(self):
-        session = BinarySession(lambda: make_tabs("libfoo.dylib", "libfoobar.dylib"))
-        with pytest.raises(BinaryNotFoundError, match="matches several"):
-            session.select("libfoo")
+        resolved = BinarySession(lambda: tabs).resolve("ls")
+        assert resolved.bv is macho
+        assert len(resolved.bv.functions) == 133
 
-    def test_unknown_name_lists_what_is_open(self):
-        session = BinarySession(lambda: make_tabs("ls"))
-        with pytest.raises(BinaryNotFoundError, match=r"\[0\] ls"):
-            session.select("nope")
+    def test_an_analysed_tab_is_left_alone(self):
+        macho = FakeBinaryView("ls", view_type="Mach-O")
+        tabs = [BinaryTab(index=0, name="ls", path="/bin/ls", bv=macho)]
+        assert BinarySession(lambda: tabs).resolve("ls").bv is macho
 
-    def test_select_with_nothing_open(self):
-        with pytest.raises(BinaryNotFoundError, match="No binaries are open"):
-            BinarySession(list).select(0)
+    def test_a_raw_only_file_stays_raw(self):
+        raw = FakeBinaryView("blob", view_type="Raw")
+        tabs = [BinaryTab(index=0, name="blob", path="/tmp/blob", bv=raw)]
+        assert BinarySession(lambda: tabs).resolve("blob").bv is raw
 
 
 class TestDescribe:
-    def test_marks_the_selected_binary(self):
-        # One stable list: a real provider hands back the same live BinaryView
-        # objects each call, and pinning is by object identity.
-        tabs = make_tabs("ls", "cat")
-        session = BinarySession(lambda: tabs)
-        session.select("cat")
-        described = session.describe()
-        assert [d["selected"] for d in described] == [False, True]
-        assert described[0]["name"] == "ls"
+    def test_lists_every_open_binary(self):
+        tabs = make_tabs(("ls-a", "/tmp/ls-a"), ("ls-b", "/tmp/ls-b"))
+        described = BinarySession(lambda: tabs).describe()
+        assert [d["name"] for d in described] == ["ls-a", "ls-b"]
+        assert described[0]["path"] == "/tmp/ls-a"
+
+    def test_nothing_open_is_an_empty_list(self):
+        assert BinarySession(list).describe() == []

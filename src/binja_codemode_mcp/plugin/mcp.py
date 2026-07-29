@@ -29,8 +29,11 @@ INSTRUCTIONS = """\
 Drive a live Binary Ninja session by writing Python.
 
 `execute` gives you the REAL Binary Ninja API, not a wrapper — use what you already
-know from api.binary.ninja. Globals: `bv` (the selected BinaryView), `bn` (the
-binaryninja module), `h` (this plugin's few helpers).
+know from api.binary.ninja. Globals: `bv` (the BinaryView you are writing to), `bn`
+(the binaryninja module), `h` (this plugin's few helpers).
+
+`bv` is whichever binary the call's `target` names, so writes never land somewhere
+you did not ask for. With one binary open you can omit it.
 
 Calls are otherwise stateless, but `h.lib["name"] = fn` saves a function for later
 ones; it re-runs against the live database whenever you call `h.lib.name()`.
@@ -45,18 +48,23 @@ EXECUTE_DESCRIPTION = """\
 Run Python against the selected binary in Binary Ninja: every query and every edit —
 reading bytes, decompiling, renaming, applying types, adding comments.
 
-Globals: `bv` (real BinaryView), `bn` (binaryninja module), `h` (helpers:
-`h.binaries()`, `h.select(index_or_name)`, `h.lib`). Real builtins and imports work.
+Globals: `bv` (the real BinaryView named by `target`), `bn` (binaryninja module),
+`h` (helpers: `h.binaries()`, `h.read_only_view(name)`, `h.lib`). Real builtins and
+imports work.
+
+`target` names the ONE binary this call may write to; omit it only when a single
+binary is open. To read from a second, `h.read_only_view("other")` — writing through
+that is detected, rolled back, and fails the call.
 
 `print()` is the return channel: verbatim, capped at 32 KB; a traceback comes back
 trimmed to its last 4 KB. Print addresses as hex. Do NOT iterate every function and
 decompile — filter to a handful first, or you blow the cap and the 30s limit.
 
-The whole script runs in one undo transaction: an exception reverts every change it
-made. Nothing persists to the next call except functions you save — `h.lib["name"] =
-fn`, then `h.lib.name()` — which re-run against the live database. Call
-`bv.update_analysis_and_wait()` after changing a function type or signature, or later
-reads see stale analysis.
+The whole script runs in one undo transaction on `target`: an exception reverts every
+change it made. Nothing persists to the next call except functions you save —
+`h.lib["name"] = fn`, then `h.lib.name()` — which re-run against the live database.
+Call `bv.update_analysis_and_wait()` after changing a function type or signature, or
+later reads see stale analysis.
 
 Read `binja_guide` first if you have not yet."""
 
@@ -70,7 +78,7 @@ function prototypes, and the calls that behave surprisingly."""
 class Backend(Protocol):
     """What the protocol layer needs from the plugin."""
 
-    def execute(self, code: str) -> Any: ...
+    def execute(self, code: str, target: Any = None) -> Any: ...
     def guide(self, topic: str | None) -> str: ...
     def status(self) -> dict[str, Any]: ...
 
@@ -150,6 +158,15 @@ class MCPHandler:
                             "type": "string",
                             "description": "Python to run against `bv`.",
                         },
+                        "target": {
+                            "type": "string",
+                            "description": (
+                                "Name of the binary to write to, as shown by "
+                                "binja_guide or h.binaries(). Optional when only "
+                                "one is open; required otherwise. This is the "
+                                "only view the script can write to."
+                            ),
+                        },
                         "description": {
                             "type": "string",
                             "description": "One line on what this script does.",
@@ -184,7 +201,10 @@ class MCPHandler:
             code = args.get("code")
             if not isinstance(code, str) or not code.strip():
                 return _tool_error("`code` is required and must be a non-empty string.")
-            result = self.backend.execute(code)
+            target = args.get("target")
+            if target is not None and not isinstance(target, str):
+                return _tool_error("`target` must be the name of an open binary.")
+            result = self.backend.execute(code, target)
 
             # Reserve the footer and the error out of the budget first, then
             # give the rest to output. The footer is concatenated after the
