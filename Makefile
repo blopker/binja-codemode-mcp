@@ -1,6 +1,7 @@
 BN_USER_DIR ?= $(HOME)/Library/Application Support/Binary Ninja
 PLUGINS_DIR := $(BN_USER_DIR)/plugins
 LINK        := $(PLUGINS_DIR)/binja_codemode_mcp
+DRIVER_DIR  := scratch/driver
 SOURCE      := $(CURDIR)/src/binja_codemode_mcp
 
 .DEFAULT_GOAL := help
@@ -55,6 +56,11 @@ status: ## Show install state and whether the server is reachable
 	fi
 
 driver: ## Run the live driver plan in a fresh Claude session
+	@# Setup the test folder
+	@rm -rf "$(DRIVER_DIR)" && mkdir -p "$(DRIVER_DIR)"
+	@cp /bin/ls "$(DRIVER_DIR)/ls-a"
+	@cp /bin/ls "$(DRIVER_DIR)/ls-b"
+	@echo "Prepared $(DRIVER_DIR)/ls-a and ls-b. Close, then open both in Binary Ninja."
 	@# Low effort: the plan states every case, so the work is following it rather
 	@# than deciding what to do, and a run is dozens of calls long.
 	claude --effort low "Run the live driver plan in @tests/driver_plan.md"

@@ -32,9 +32,16 @@ needs.
 2. `Plugins → Code Mode MCP → Start Server`, or click the status-bar indicator.
 3. The log prints the endpoint, the API key, and a ready-to-paste command:
 
+Claude
 ```sh
 claude mcp add --transport http binja http://127.0.0.1:42069/mcp \
   --header "Authorization: Bearer binja-codemode-local"
+```
+
+Opencode
+```sh
+opencode mcp add binja --url http://127.0.0.1:42069/mcp \
+  --header "Authorization=Bearer binja-codemode-local"
 ```
 
 If `claude mcp list` shows the server connected but `execute` and `binja_guide` do not
@@ -210,8 +217,9 @@ from the app bundle. `binaryninja.load()` does not — a Personal licence forbid
 
 Whether a transaction reaches the `.bndb` cannot be tested here, and neither can undo
 grouping, tab handling, or the guide's own advice. `tests/driver_plan.md` covers that:
-`make driver` hands it to a model connected to a running server, which works through it
-and writes a report to `scratch/`. A human is needed twice — once to set up, once at a
+`make driver` lays out fresh copies of `/bin/ls` under `scratch/driver/` and hands the
+plan to a model connected to a running server, which works through it and writes a report
+to `scratch/`. A human is needed twice — once to set up, once at a
 checkpoint that needs a save, a tab close, and a look at the window.
 
 Read the report's E2 section first. Asking what the driver had to discover by trial and

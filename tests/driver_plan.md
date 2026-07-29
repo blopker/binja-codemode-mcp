@@ -20,32 +20,28 @@ a failure rather than working around it. The workaround is the finding.
 
 Pass `topic` to `binja_guide` except where told otherwise — the full guide is ~9 KB a call.
 
+Cases leave this plan once the suite covers them and several runs have passed them, so
+what is here is what pytest cannot reach: real transactions, real undo, real analysis, tab
+handling, the client's own behaviour, and whether the guide is followable. Deliberately
+absent, and not to be added back — Python scoping and builtins, reading the file on disk,
+the rollback note's wording, the status bar and menu entries, and `h.lib`'s ordinary
+refusals. All are unit-tested and all have passed every run.
+
 ---
 
 ## Setup — everything the human does, first
 
-Cleanup happens here rather than at the end, so a run that stops partway leaves its
-databases intact to inspect and the *next* run clears them. Close any tabs left over from
-a previous run first — this deletes the files they are open on. Then, from the repo root:
+`make driver` has already cleared `scratch/driver/` and put fresh copies of `/bin/ls`
+there as `ls-a` and `ls-b`. Do not recreate them, and do not clean up at the end: the
+*next* run clears them, so a run that stops partway leaves its databases intact to
+inspect. Reports at the `scratch/` root are left alone either way.
 
-```sh
-rm -rf scratch/driver && mkdir -p scratch/driver
-cp /bin/ls scratch/driver/ls-a
-cp /bin/ls scratch/driver/ls-b
-```
+Ask the human for all of this in one message:
 
-That removes the previous run's copies and the `.bndb` files Binary Ninja wrote beside
-them. Reports at the `scratch/` root are left alone.
+1. Open `scratch/driver/ls-a` **and** `scratch/driver/ls-b`, let both finish analysing.
+2. Start the server.
 
-Then, in one pass:
-
-1. **With no file open**, click the status-bar indicator: it should read Running, and
-   clicking again should stop it. Confirm `Plugins > Code Mode MCP` lists all three
-   entries with nothing loaded.
-2. Open `scratch/driver/ls-a` **and** `scratch/driver/ls-b`, let both finish analysing.
-3. Start the server.
-
-Report those three results, then leave it alone until the Checkpoint.
+Report both, then leave it alone until the Checkpoint.
 
 ---
 
@@ -60,13 +56,6 @@ names its own `target`, and the header is where you learn which names are valid.
 **A2 — the globals are real.** `print(type(bv).__module__, type(bv).__name__)`,
 `bn.core_version()`, `h.binaries()`. Expect `binaryninja.binaryview BinaryView`, a version,
 and two entries. `bn` as `None` means the module never reached the script.
-
-**A3 — ordinary Python works.** One script importing `struct`, using a comprehension, and
-defining a nested function that reads a top-level name. Expect no `NameError` — this is the
-scoping bug that used to force `global` workarounds.
-
-**A4 — the filesystem is reachable.** Read `bv.file.original_filename` and print its first
-16 bytes alongside `bv.read(bv.start, 16)`. Both must print; they need not match.
 
 ## B. Transactions — the reason this rewrite exists
 
@@ -132,9 +121,12 @@ output with a note. Then the part that matters: did it arrive **inline**, or did
 spill it to a file? The cap dropped from 100 KB to 32 KB because 100 KB was being spilled
 and never read. If 32 KB still spills, say so.
 
-**D2 — the timeout discards its work, and overlap is refused.** One call that renames the
-entry function to `driver_timeout_probe` then `time.sleep(45)`. While it sleeps, send a
-second call: expect "a previous script is still running", not a hang. Expect the first to
+**D2 — the timeout discards its work, and overlap is handled.** First check the ordinary
+collision: two quick calls issued together should **both succeed**, because a second call
+waits a few seconds for the first rather than being refused outright. Then the real case —
+one call that renames the entry function to `driver_timeout_probe` then `time.sleep(45)`.
+While it sleeps, send a second call: expect it to wait, then report that a script is still
+running *and name the binary it is running on*, not to hang. Expect the first to
 time out at ~30s saying the batch was discarded. Wait ~20s, then read the name back: expect
 the **original**. `driver_timeout_probe` surviving means an abandoned script committed
 after its call had already reported failure.
@@ -144,12 +136,7 @@ and `raise ValueError("x" * 500_000)`. Expect useful messages, a bounded result 
 `ValueError` that arrives inline rather than spilled, the timing footer intact, and the
 endpoint still serving. The large error is the gap that let an unbounded traceback ship.
 
-**D4 — a rollback is stated.** Rename a function and raise in the same script. Expect a
-rollback note, and a second call confirming the original name. Every failure reverts and
-says so, including one that changed nothing — there is no reliable way to tell, so the note
-is vacuous rather than absent.
-
-**D5 — a removed function stays removed.** `remove_user_function`, not `remove_function`:
+**D4 — a removed function stays removed.** `remove_user_function`, not `remove_function`:
 the latter is an auto-level action analysis undoes. Remove a real function, check
 `get_function_at` is `None`, `update_analysis_and_wait()`, check again. Expect `True` both
 times, then `bv.undo()` and confirm it returns.
@@ -192,17 +179,26 @@ must differ, without the function being redefined. Then save one that takes a vi
 parameter and pass `h.read_only_view(...)` to it. Also confirm a saved function's
 `print()` output comes back in the calling script's result.
 
-**G3 — what it carries, what it refuses.** A script that does `import json` at the top and
-saves a function using it must still work several calls later, and so must one reading a
-top-level constant — those are carried deliberately. These must each fail with a message
-saying why: a *nested* function capturing an enclosing local (a top-level name is not a
-closure and is accepted), `h.lib["d"] = json.dumps`, and `h.lib["c"] = 5`.
+**G3 — what it carries, and the refusal that matters.** A script that does `import json`
+at the top and saves a function using it must still work several calls later, and so must
+one reading a top-level constant — those are carried deliberately.
 
-**G4 — error quality.** Failures now report the *line* that raised, not just its number.
+Then the refusal worth checking by hand, because it is the shape the closure message
+recommends: `def where(src=bv): ...` saved into `h.lib`. It must be refused, naming the
+default argument — a view held that way would still point at this call's binary when the
+function is later run against another target. Confirm the message says to take the view as
+a parameter, and that an ordinary default (`def top(limit=5)`) is still accepted.
+
+**G4 — the dump is self-sufficient.** Save a function that uses a top-level `import` and a
+constant, then read `h.lib_sources()`. It is advertised as what you paste into a new
+session, so the import and the constant must appear alongside the `def` — a previous run
+found only the bodies, which raise `NameError` on first use.
+
+**G5 — error quality.** Failures now report the *line* that raised, not just its number.
 Confirm on an ordinary failure, then on a raise inside a function saved 15+ calls earlier —
 the second is where the source has to be republished from the library.
 
-**G5 — was it worth it?** Did you save anything without being told to? Call a saved
+**G6 — was it worth it?** Did you save anything without being told to? Call a saved
 function more than once? If you re-emitted the same code across calls instead of saving it,
 say so — that is the outcome that would retire the feature.
 
@@ -217,9 +213,12 @@ Ask for all of this in one message, then stop.
    longer does, on the theory that undo-registered changes propagate on their own.
 2. Close the **`ls-b`** tab.
 3. Save `ls-a` (⌘S), close its tab, reopen the `.bndb`.
-4. While a script is running, do **not** edit the database — a failed script reverts to
-   where its transaction opened and would take your edit with it. Section D2 runs for 30
-   seconds; leave it alone.
+4. Glance at the log pane: every call should have logged what it was doing and which
+   binary, then its verdict and elapsed time. Ask whether the failures said "rolled back".
+5. While a script is running, do **not** edit the database — a failed script reverts to
+   where its transaction opened and would take your edit with it. The status bar says
+   `⚠️ MCP: running script Ns. Do not edit` while one holds it; D2 runs for 30 seconds, so
+   confirm the warning appears and then leave it alone.
 
 ## F. After the Checkpoint
 
@@ -236,8 +235,8 @@ vanished on save.
 ## Report format
 
 Write the report to `scratch/driver-run-<timestamp>.md` — `date +%Y-%m-%d-%H%M` for the
-timestamp — and summarise it in chat. At the scratch root, not `scratch/driver/`, so
-Cleanup does not delete it. `scratch/` is gitignored; the findings worth keeping get
+timestamp — and summarise it in chat. At the scratch root, not `scratch/driver/`, which
+the next `make driver` wipes. `scratch/` is gitignored; the findings worth keeping get
 copied out and folded into `guide.md`.
 
 `PASS`, `FAIL`, or `SKIPPED (reason)` per case. For a failure give the exact code sent,
@@ -249,5 +248,5 @@ Finish with:
 - Anything that cost more round trips than it should have.
 - Whether you would trust this to make changes to a database you cared about, and why.
 
-Leave the tabs and the databases as they are. Setup clears them at the start of the next
-run, which is what makes a half-finished run inspectable.
+Leave the tabs and the databases as they are. `make driver` clears them at the start of
+the next run, which is what makes a half-finished run inspectable.
