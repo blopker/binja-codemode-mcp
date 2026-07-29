@@ -225,9 +225,13 @@ the disproof took two calls.
 
 ### Known limitations
 
-- The execution timeout cannot interrupt a running script. The batch is marked abandoned
-  so it reverts rather than commits when it eventually finishes, and no other script can
-  run until it does, but a `while True:` still leaks a thread for the life of the process.
+- The execution timeout interrupts a running script only sometimes. A script that outran
+  it is marked abandoned, so it reverts rather than commits whenever it finishes, and no
+  other script can run until it does. On top of that the executor raises an asynchronous
+  exception into it, which evicts a plain runaway loop immediately — but measurably does
+  **not** evict a loop whose body contains a `try`/`except`, and does nothing at all while
+  the script sits inside a long Binary Ninja core call. A script of either shape still
+  holds the executor until it returns on its own.
 - `tools/list_changed` is advertised but never emitted: the tool surface does not actually
   change when tabs open and close, and the guide header is regenerated per call.
 - `uicontext.list_tabs()` depends on `binaryninjaui` methods that have no type stubs. If

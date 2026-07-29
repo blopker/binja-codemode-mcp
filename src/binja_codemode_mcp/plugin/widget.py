@@ -28,11 +28,31 @@ _ui_notification = None
 _plugin_instance = None
 
 
-def _get_status_text(running: bool) -> str:
-    """Get the status text for the button."""
+def _get_status_text(running: bool, script=None) -> str:
+    """The label, with a warning while a script holds the database.
+
+    A failed script reverts the database to where its transaction opened, which
+    takes any edit the user made in the meantime with it. Nothing can prevent
+    that — Binary Ninja has no per-thread undo scoping — so the one mitigation
+    is telling them, at the moment it matters, that now is not the time to type.
+    """
+    if script is not None:
+        _target, elapsed = script
+        return f"⚠️ MCP: running script {elapsed:.0f}s. Do not edit"
     if running:
         return "🟢 MCP: Running"
     return "🔴 MCP: Stopped"
+
+
+def _get_status_tooltip(script=None) -> str:
+    if script is None:
+        return "Click to start/stop MCP server"
+    target, _elapsed = script
+    where = f" against {target}" if target else ""
+    return (
+        f"A script is running{where}.\n"
+        "Edits you make now will be rolled back with it if it fails."
+    )
 
 
 def _create_status_button():
@@ -92,7 +112,9 @@ def _update_status_indicator():
         return
 
     running = _plugin_instance.is_running
-    _status_button.setText(_get_status_text(running))
+    script = _plugin_instance.running_script if running else None
+    _status_button.setText(_get_status_text(running, script))
+    _status_button.setToolTip(_get_status_tooltip(script))
 
 
 def _ensure_indicator_in_status_bar():

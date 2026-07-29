@@ -164,7 +164,9 @@ class TestSettleContract:
         assert "reverted" not in (result.error or "")
         slow.set()
         executor.wait_for_idle(timeout=5)
-        assert view.committed == 1
+        assert view.committed == 1, (
+            "a batch already committing must not be interrupted mid-close"
+        )
 
     def test_the_timeout_result_carries_the_budget(self, bv):
         """The footer's whole job is sizing the next batch; the timeout is the
@@ -235,6 +237,38 @@ class TestSettleContract:
         )
         assert result.success
         assert other.committed == 1
+
+
+class TestInterruption:
+    """A script that outruns the deadline used to hold the lock for the life of
+    the process, so one `while True:` disabled the plugin until Binary Ninja was
+    restarted.
+
+    Best-effort, and deliberately not tested beyond what it delivers: CPython's
+    asynchronous exception does not evict a loop whose body contains a
+    `try`/`except`, and no amount of re-arming changes that. Such a script still
+    holds the lock until it finishes, exactly as before. There is no test for it
+    here because the only way to write one is to leave a thread spinning for the
+    rest of the session."""
+
+    def test_a_runaway_loop_is_evicted_and_rolled_back(self, bv):
+        executor = CodeExecutor(timeout=0.2)
+        result = executor.execute(
+            "bv.rename('doomed')\nwhile True:\n    pass", target=bv
+        )
+        assert result.timed_out
+        assert "interrupted" in (result.error or "")
+        assert executor.wait_for_idle(timeout=3), "the lock was never handed back"
+        assert bv.renames == [], "its changes must be rolled back like any failure"
+        assert bv.reverted == 1
+
+    def test_the_executor_is_usable_again_afterwards(self, bv):
+        executor = CodeExecutor(timeout=0.2)
+        executor.execute("while True:\n    pass", target=bv)
+        executor.wait_for_idle(timeout=3)
+        assert executor.execute("print('recovered')", target=bv).output.strip() == (
+            "recovered"
+        )
 
 
 class TestQueueing:

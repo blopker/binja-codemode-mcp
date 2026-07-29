@@ -78,6 +78,38 @@ class TestTargeting:
         assert backend.execute("bv.rename('after')").success
 
 
+class TestRunningScript:
+    """The status indicator's only source of truth. A failed script reverts the
+    database to where its transaction opened, taking any edit the user made in
+    the meantime with it; nothing can prevent that, so telling them while it
+    matters is the whole mitigation."""
+
+    def test_idle_reports_nothing(self, backend):
+        assert backend.running_script() is None
+
+    def test_a_running_script_reports_its_target_and_age(self, config, bv):
+        import threading
+        import time
+
+        tabs = [BinaryTab(0, "ls-a", "/bin/ls-a", bv)]
+        backend = PluginBackend(config, tabs_provider=lambda: tabs)
+
+        worker = threading.Thread(
+            target=lambda: backend.execute("import time\ntime.sleep(0.25)"),
+            daemon=True,
+        )
+        worker.start()
+        time.sleep(0.1)
+        live = backend.running_script()
+        worker.join(5)
+
+        assert live is not None, "the indicator had nothing to warn about"
+        target, elapsed = live
+        assert target == "ls-a"
+        assert 0.0 < elapsed < 5.0
+        assert backend.running_script() is None, "cleared once the script ends"
+
+
 class TestReadOnlyView:
     """One view is writable; the other is named for what it is."""
 

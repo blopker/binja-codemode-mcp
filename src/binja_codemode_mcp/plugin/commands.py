@@ -28,6 +28,15 @@ class BinjaCodeModeMCP:
     def is_running(self) -> bool:
         return self._server is not None and self._server.running
 
+    @property
+    def running_script(self) -> tuple[str | None, float] | None:
+        if self._backend is None:
+            return None
+        try:
+            return self._backend.running_script()
+        except Exception:  # the indicator must never take the plugin down
+            return None
+
     def start_server(self, bv: object = None) -> None:
         if self.is_running:
             log_error("Code Mode MCP: already running.")

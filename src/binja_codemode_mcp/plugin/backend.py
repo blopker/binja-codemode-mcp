@@ -523,6 +523,10 @@ class PluginBackend:
             watcher_factory=self._watcher_factory,
         )
 
+    def running_script(self) -> tuple[str | None, float] | None:
+        """A script in flight, for the status indicator to warn about."""
+        return self.executor.running_script()
+
     def guide(self, topic: str | None) -> str:
         return render(self.status(), topic)
 

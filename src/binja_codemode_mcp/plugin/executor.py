@@ -4,6 +4,7 @@ Pure module: views are duck-typed, so this is testable without Binary Ninja.
 """
 
 import contextlib
+import ctypes
 import itertools
 import linecache
 import threading
@@ -18,6 +19,12 @@ from typing import Any
 # quote the line that raised instead of just numbering it, and inspect.getsource
 # works on functions the script saved into h.lib.
 SCRIPT_PREFIX = "<mcp:"
+# How long an interrupted script is given to unwind and revert before the caller
+# stops waiting. A Python-level loop raises at the next backward jump and settles
+# immediately, so this only has to cover the unwind — and a thread blocked in a C
+# call will never see the exception at all, so waiting longer buys nothing except
+# a slower answer on exactly the calls that already took the full timeout.
+INTERRUPT_GRACE_S = 0.1
 KEEP_SOURCES = 8  # recent scripts whose text stays available
 _call_seq = itertools.count(1)
 
@@ -43,6 +50,46 @@ def publish_source(name: str, code: str) -> None:
     held = [k for k in linecache.cache if k.startswith(SCRIPT_PREFIX)]
     for stale in held[:-KEEP_SOURCES]:  # insertion order is age order
         linecache.cache.pop(stale, None)
+
+
+class _Abandoned(BaseException):
+    """Raised into a script that outran its deadline.
+
+    BaseException, not Exception: a script wrapping its loop in
+    `except Exception` would otherwise swallow its own eviction.
+    """
+
+
+def _interrupt(thread: threading.Thread) -> bool:
+    """Raise _Abandoned inside a running thread. True if it was delivered.
+
+    CPython cannot kill a thread, but it will raise asynchronously into one.
+    The exception does not fire while the thread sits in a C call — it stays
+    pending and raises at the next bytecode boundary — so it cannot land inside
+    a Binary Ninja core operation mid-write.
+
+    Best effort, and the limits are real. Measured: it evicts a bare
+    `while True:` immediately, does nothing until a long core call returns, and
+    does **not** evict a loop whose body contains a `try`/`except` at all —
+    re-arming does not help. A script of that shape still holds the executor
+    until it finishes, which is what happened before any of this existed, so a
+    failed interrupt costs nothing beyond the attempt.
+    """
+    ident = thread.ident
+    if ident is None:
+        return False
+    try:
+        delivered = ctypes.pythonapi.PyThreadState_SetAsyncExc(
+            ctypes.c_ulong(ident), ctypes.py_object(_Abandoned)
+        )
+    except Exception:
+        return False
+    if delivered > 1:
+        # Documented recovery: undo rather than leave exceptions pending in
+        # threads we did not mean to touch.
+        ctypes.pythonapi.PyThreadState_SetAsyncExc(ctypes.c_ulong(ident), None)
+        return False
+    return delivered == 1
 
 
 @dataclass
@@ -87,21 +134,28 @@ class _Budget:
         self._chunks: list[str] = []
         self._size = 0
         self._truncated = False
-        self._lock = threading.Lock()
 
     def write(self, text: str) -> None:
-        with self._lock:
-            if self._truncated:
-                return
-            self._size += len(text.encode("utf-8", "replace"))
-            self._chunks.append(text)
-            if self._size > self.max_bytes:
-                self._truncated = True
+        """Deliberately lock-free.
+
+        Exactly one script runs at a time, so there is one writer and one
+        reader. `list.append` and a slice are each a single C-level operation
+        under the GIL, which is all the safety this needs — and a lock here
+        would be a deadlock waiting to happen: an abandoned script is
+        interrupted with an asynchronous exception, and one landing between
+        acquiring this lock and releasing it would block the caller's read
+        forever. A racy `_size` costs at most a chunk either side of the cap.
+        """
+        if self._truncated:
+            return
+        self._chunks.append(text)
+        self._size += len(text.encode("utf-8", "replace"))
+        if self._size > self.max_bytes:
+            self._truncated = True
 
     def value(self) -> str:
-        with self._lock:
-            out = "".join(self._chunks)
-            truncated = self._truncated
+        out = "".join(self._chunks[:])  # snapshot first; the writer may still run
+        truncated = self._truncated
         if not truncated:
             return out
         # Trim on the encoded form so the advertised cap really is in bytes.
@@ -206,7 +260,7 @@ class Batch:
                     reverted = True
                 else:
                     entry.view.commit_undo_actions(entry.state)
-            except Exception as e:
+            except BaseException as e:
                 verb = "revert" if undo_this else "commit"
                 if failure is None:
                     failure = (
@@ -350,6 +404,11 @@ class CodeExecutor:
                     return
                 try:
                     exec(compiled, scope, scope)
+                except _Abandoned:
+                    # We raised this. The caller has already reported the
+                    # timeout, so a traceback here would only be noise.
+                    outcome.error = "Interrupted after exceeding the time limit."
+                    revert = True
                 except BaseException as e:
                     # BaseException, not Exception: sys.exit() inside a script
                     # reverts the batch just the same, so reporting success for
@@ -409,8 +468,22 @@ class CodeExecutor:
         # model would re-run it and apply everything twice.
         if not outcome.settled:
             outcome.abandoned = True
+            # Evict it rather than let it hold the lock for the life of the
+            # process. It reverts on the way out through the same path a raising
+            # script takes, so nothing new has to undo anything.
+            # Only while the script itself is still running. Once it is
+            # settling, the database is mid-commit and an exception landing
+            # there would abandon a half-closed transaction — worse than the
+            # runaway this is meant to evict.
+            if not outcome.settling and _interrupt(thread):
+                thread.join(timeout=INTERRUPT_GRACE_S)
             elapsed = time.time() - started
-            if outcome.settling:
+            if outcome.settled:
+                detail = (
+                    "the script was interrupted and everything it changed has "
+                    "been rolled back."
+                )
+            elif outcome.settling:
                 # The script itself finished; the database is mid-commit and
                 # cannot be called back. Claiming a rollback here would send the
                 # model to re-run work that in fact landed.
@@ -451,6 +524,18 @@ class CodeExecutor:
         return ExecutionResult(
             success=True, output=output, elapsed_s=elapsed, timeout_s=self.timeout
         )
+
+    def running_script(self) -> tuple[str | None, float] | None:
+        """The script in flight and how long it has run, or None when idle.
+
+        Polled from the Qt main thread by the status indicator, so it must not
+        block or take the lock: these are plain attribute reads of immutable
+        values, and the worst a torn read costs is a stale label for one tick.
+        """
+        started = self._started_at
+        if started is None:
+            return None
+        return (self._running_target, max(0.0, time.time() - started))
 
     def wait_for_idle(self, timeout: float | None = None) -> bool:
         """Block until no script is running. For tests and orderly shutdown."""
