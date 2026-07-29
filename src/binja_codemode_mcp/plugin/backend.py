@@ -5,6 +5,7 @@ Views are duck-typed throughout, so this is testable without Binary Ninja; only
 the real thing, and all three degrade to None without it.
 """
 
+import ast
 import inspect
 import keyword
 import linecache
@@ -267,12 +268,48 @@ class _Library:
         return ", ".join(self._entries) or "nothing"
 
     def _sources(self) -> str:
+        """Every definition, with what each one needs to run.
+
+        The bodies alone are not enough to paste into a new session: a saved
+        function carries the top-level imports and constants it referenced, and
+        without them the text raises NameError on the first call. Anything that
+        cannot be written back as source is named in a comment rather than
+        silently omitted.
+        """
         if not self._entries:
             return "h.lib is empty."
-        return "\n\n".join(
-            f'# h.lib["{key}"]\n{rec.source.rstrip()}'
-            for key, rec in self._entries.items()
-        )
+        blocks = []
+        for key, rec in self._entries.items():
+            preamble = _render_captured(rec.captured)
+            blocks.append(f'# h.lib["{key}"]\n{preamble}{rec.source.rstrip()}')
+        return "\n\n".join(blocks)
+
+
+def _render_captured(captured: dict[str, Any]) -> str:
+    """Source for the top-level names a saved function carries, where possible."""
+    lines: list[str] = []
+    for name, value in sorted(captured.items()):
+        if isinstance(value, types.ModuleType):
+            actual = getattr(value, "__name__", name)
+            lines.append(
+                f"import {actual}" if actual == name else f"import {actual} as {name}"
+            )
+            continue
+        if isinstance(value, types.FunctionType):
+            try:
+                lines.append(inspect.getsource(value).rstrip())
+            except OSError:
+                lines.append(f"# {name}() — helper source no longer available")
+            continue
+        try:  # only values that read back as what they are
+            rendered = repr(value)
+            if ast.literal_eval(rendered) == value:
+                lines.append(f"{name} = {rendered}")
+                continue
+        except (ValueError, SyntaxError, TypeError, MemoryError):
+            pass
+        lines.append(f"# {name} = <{type(value).__name__}> — re-supply this by hand")
+    return "\n".join(lines) + "\n\n" if lines else ""
 
 
 class Helpers:

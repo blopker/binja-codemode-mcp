@@ -466,6 +466,32 @@ class TestLibrary:
         assert "def a():" in out
         assert "def b():" in out
 
+    def test_lib_sources_carries_what_each_function_needs(self, backend):
+        """It is advertised as what you paste into a new session, so bodies
+        alone are not enough — a carried import or constant that is missing
+        raises NameError on the first call."""
+        backend.execute(
+            "import json\n"
+            "LIMIT = 7\n"
+            "def summarise():\n"
+            "    return json.dumps({'limit': LIMIT})\n"
+            'h.lib["summarise"] = summarise'
+        )
+        dump = backend.execute("print(h.lib_sources())").output
+        assert "import json" in dump
+        assert "LIMIT = 7" in dump
+        assert "def summarise():" in dump
+
+    def test_lib_sources_names_what_it_cannot_write_back(self, backend):
+        """Silently omitting it would produce a dump that looks complete and
+        is not."""
+        backend.execute(
+            'HANDLE = object()\ndef uses():\n    return HANDLE\nh.lib["uses"] = uses'
+        )
+        dump = backend.execute("print(h.lib_sources())").output
+        assert "HANDLE" in dump
+        assert "re-supply this by hand" in dump
+
     def test_the_listing_shows_signature_and_docstring(self, backend):
         backend.execute(
             'def unported(src=1):\n    """Names that differ."""\n'

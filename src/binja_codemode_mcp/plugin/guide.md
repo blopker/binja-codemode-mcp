@@ -43,10 +43,13 @@ binary open you can leave `target` out; with more than one it is required, becau
 that guessed could put a write in a database you did not choose. Everything on `bv` works, and so does ordinary Python. A few
 helpers cover what the Binary Ninja API does not:
 
-- `h.binaries()` — list open binaries and the names a `target` can use.
+- `h.binaries()` — list open binaries and the names a `target` can use. A target matches
+  on any part of the name or path, so `target="fw-1.3"` keeps working after Binary Ninja
+  renames the tab to `fw-1.3.bndb` on save. An ambiguous match is refused, not guessed.
 - `h.read_only_view(name)` — another open binary, to read from. Writing through it is
   detected, rolled back, and fails the call.
-- `h.lib` — functions saved for later calls, and `h.lib_sources()` to dump them.
+- `h.lib` — functions saved for later calls, and `h.lib_sources()` to dump them with the
+  imports and constants each one carries.
 
 **You have the filesystem.** There is no sandbox: `open()`, `pathlib`, `struct`,
 `hashlib`, `subprocess` all work. Reading the file on disk alongside the analysis is often
@@ -228,11 +231,20 @@ if they were annotations is exactly the wrong-name-is-worse-than-no-name failure
 |---|---|
 | Symbol | `sym.auto` is `False`, over `bv.get_symbols()` |
 | Data variable | `var.auto_discovered` is `False` |
-| Function variable | `func.is_var_user_defined(var)` |
+| Function variable | `func.is_var_user_defined(var)` — but see the warning below |
 | Type | present in `bv.user_type_container.types` |
 
 `user_type_container.types` is a mapping of *type id* to `(QualifiedName, Type)` — keyed
 by an opaque id, not by name, so match on the name inside the tuple.
+
+**`is_var_user_defined` lies about any function that has been through
+`remove_user_function` and then `bv.undo()`.** The function comes back with two `void*`
+register arguments flagged user-defined, and `update_analysis_and_wait()` does not fix it.
+A save and reload restores the real variable list, but the false flags persist into the
+`.bndb`. Measured: a database whose only human edits were five renames reported exactly two
+user-defined variables, both planted this way. Port on that predicate and you carry two
+invented argument types across as if they were annotations. If a function has been through
+that cycle, do not trust the predicate on it.
 
 ## Reading the binary
 
@@ -505,6 +517,11 @@ lo, hi = 0x397E4, 0x479F0
 false_functions = [f for f in bv.functions if lo <= f.start < hi]
 print(len(false_functions), [hex(f.start) for f in false_functions[:20]])
 ```
+
+**Do not undo a removal with `bv.undo()`.** It restores the function but not its variable
+state, and leaves two `void*` arguments flagged user-defined — permanently, surviving a
+save. To back out a removal, let the call fail instead: raise inside the same script and
+the transaction rollback restores everything cleanly.
 
 Then remove them, define the real data objects so the intended interpretation is explicit,
 and rescan. Use `remove_user_function`, not `remove_function`: the latter is an auto-level

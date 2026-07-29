@@ -54,8 +54,8 @@ Report those three results, then leave it alone until the Checkpoint.
 **A1 — the guide describes the live session.** Call `binja_guide` with no `topic` (the one
 case that wants the whole document). Expect a Mach-O view, an architecture, a non-zero
 function count, "Analysis: complete", a version, and two open tabs with one marked
-named. Any `?`, `0`, or `unknown` is a failure. Nothing is "selected" any more — every
-call names its own `target`, so the header is where you learn what names are valid.
+named. Any `?`, `0`, or `unknown` is a failure. Nothing is marked selected — every call
+names its own `target`, and the header is where you learn which names are valid.
 
 **A2 — the globals are real.** `print(type(bv).__module__, type(bv).__name__)`,
 `bn.core_version()`, `h.binaries()`. Expect `binaryninja.binaryview BinaryView`, a version,
@@ -153,6 +153,11 @@ is vacuous rather than absent.
 the latter is an auto-level action analysis undoes. Remove a real function, check
 `get_function_at` is `None`, `update_analysis_and_wait()`, check again. Expect `True` both
 times, then `bv.undo()` and confirm it returns.
+
+Then check what the undo cost: count `is_var_user_defined` across the restored function.
+Undoing a removal is known to leave two `void*` arguments falsely flagged, permanently.
+Confirm the guide's warning still matches what you see, and report if the count is anything
+other than two.
 
 ## E. Guidance quality
 
