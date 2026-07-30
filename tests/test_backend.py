@@ -214,13 +214,30 @@ class TestReadOnlyView:
         assert result.success, result.error
         assert result.output.strip() == "/bin/other"
 
-    def test_a_clean_read_commits_silently(self, config, bv):
-        """An empty commit is silent where an empty revert raises the Binary
-        Ninja window, so the ordinary two-database call costs nothing."""
+    def test_a_clean_read_still_reverts(self, config, bv):
+        """Correctness does not depend on proving that the view stayed clean."""
         backend, other = self._two(config, bv, watcher=_never_written)
         assert backend.execute('h.read_only_view("other")', "target").success
-        assert other.committed == 1
-        assert other.reverted == 0
+        assert other.committed == 0
+        assert other.reverted == 1
+
+    def test_no_watcher_still_cannot_turn_read_only_into_writable(self, config, bv):
+        backend, other = self._two(config, bv)
+        result = backend.execute(
+            'src = h.read_only_view("other")\nsrc.rename("sneaky")', "target"
+        )
+        assert result.success
+        assert other.reverted == 1
+        assert other.renames == []
+
+    def test_an_undetected_write_cannot_persist(self, config, bv):
+        backend, other = self._two(config, bv, watcher=_never_written)
+        result = backend.execute(
+            'src = h.read_only_view("other")\nsrc.rename("sneaky")', "target"
+        )
+        assert result.success
+        assert other.reverted == 1
+        assert other.renames == []
 
     def test_a_write_through_it_is_rolled_back_and_fails_the_call(self, config, bv):
         backend, other = self._two(config, bv, watcher=_always_written)

@@ -229,9 +229,7 @@ class TestGuideContent:
         for leftover in ("nrf5", "softdevice", "ble_gap", "binja._bv", "binja."):
             assert leftover not in text, leftover
 
-    def test_says_a_write_to_a_read_only_view_fails_only_at_the_end(self):
-        """The assignment succeeds, so a script that tests its own write there
-        concludes the opposite of the truth."""
+    def test_says_a_read_only_view_always_rolls_back(self):
         text = guide_text()
+        assert "transaction always" in text
         assert "after the script finishes" in text
-        assert "do not probe it with a test write" in text

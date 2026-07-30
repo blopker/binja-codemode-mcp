@@ -239,7 +239,7 @@ class TestSettleContract:
             "pass", target=bv, on_call=wire, watcher_factory=leaky
         )
         assert result.success
-        assert other.committed == 1
+        assert other.reverted == 1
 
 
 class TestInterruption:

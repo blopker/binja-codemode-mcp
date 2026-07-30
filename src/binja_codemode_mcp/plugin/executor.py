@@ -206,7 +206,8 @@ class _Held:
     view: Any
     state: Any
     name: str
-    written: Callable[[], bool] | None = None  # None for the write target
+    read_only: bool = False
+    written: Callable[[], bool] | None = None
     release: Callable[[], None] | None = None
 
 
@@ -215,11 +216,9 @@ class Batch:
 
     The write target's state opens before the script runs, so a write to it is
     inside a transaction by construction rather than by luck. A read-only view's
-    state opens when the script asks for the view, and how it closes depends on
-    whether anything wrote to it: reverted if something did, committed if
-    nothing did. An empty commit is silent where an empty revert raises the
-    Binary Ninja window, so the ordinary two-database call costs nothing and a
-    stray write to the source is undone rather than left unprotected.
+    state opens when the script asks for it and always reverts. The write watcher
+    improves the error message; correctness does not depend on its incomplete
+    notification coverage.
     """
 
     def __init__(self, watcher_factory: Callable[[Any], Any] | None = None) -> None:
@@ -248,6 +247,7 @@ class Batch:
                     view=view,
                     state=state,
                     name=name,
+                    read_only=True,
                     written=written,
                     release=release,
                 )
@@ -291,9 +291,10 @@ class Batch:
                 if wrote:
                     self.violations.append(entry.name)
 
-            # The target follows the caller's verdict; a read-only view follows
-            # whether anything wrote through it.
-            undo_this = revert if entry.written is None else wrote
+            # The target follows the caller's verdict. A read-only view always
+            # reverts, so writes outside the watcher's notification coverage
+            # cannot leak into another database.
+            undo_this = True if entry.read_only else revert
             try:
                 if undo_this:
                     entry.view.revert_undo_actions(entry.state)

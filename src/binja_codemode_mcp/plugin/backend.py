@@ -414,10 +414,9 @@ class Helpers:
         """Another open binary, to read from.
 
         The name is the point: it is read at every call site, which is more
-        often than any guide. Reads are safe; a write through this view is
-        detected and rolled back, and fails the call. Only the `target` named in
-        the tool call is writable, and only it is covered by a transaction that
-        commits.
+        often than any guide. Reads are safe because this view's transaction
+        always rolls back. Detected writes also fail the call. Only the `target`
+        named in the tool call is writable, and only its transaction can commit.
         """
         tab = self._session.resolve(key)
         # By view, not by display name: two tabs can share a name — the same
@@ -441,9 +440,9 @@ class Helpers:
 
 # Mutations a script can make that mean "this view was written to". Deliberately
 # excludes FunctionUpdated: analysis fires it on its own, so a read-only view
-# would accuse a script that only read from it. A false negative leaves a stray
-# write committed, which is what happened before any of this existed; a false
-# positive fails a legitimate call, which is worse.
+# would accuse a script that only read from it. A false negative now only misses
+# the diagnostic because every read-only transaction reverts regardless; a
+# false positive still fails a legitimate call.
 _WRITE_NOTIFICATIONS = (
     "DataWritten",
     "DataInserted",
@@ -465,7 +464,7 @@ _WRITE_NOTIFICATIONS = (
 
 
 def make_watcher_factory(bn: Any) -> Callable[[Any], Any] | None:
-    """Build the read-only write detector, or None without Binary Ninja.
+    """Build the read-only violation detector, or None without Binary Ninja.
 
     Returns a callable that takes a view and returns `(was_written, release)`.
     The callback is synchronous and fires on the thread that made the change, so

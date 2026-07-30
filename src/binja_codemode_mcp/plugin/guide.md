@@ -19,8 +19,8 @@
 only writable view. Omit `target` only when one binary is open.
 
 - `h.binaries()` lists open binaries and target names.
-- `h.read_only_view(name)` opens another tab for reading. A write is rolled back and
-  fails the call after the script finishes; do not probe it with a test write.
+- `h.read_only_view(name)` opens another tab for reading. Its transaction always
+  rolls back; a detected write also fails the call after the script finishes.
 - Normal Python, imports, and filesystem access work. Use `bv.read(address, length)`
   for mapped bytes; `bv.file.original_filename` names the original file.
 

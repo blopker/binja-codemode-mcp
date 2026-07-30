@@ -93,8 +93,8 @@ name its writable target. Names match any unique part of an open binary's name o
 ambiguous matches are rejected.
 
 Read another open binary with `h.read_only_view("name")`. It returns a live
-`BinaryView`, so types and annotations can move directly between databases. A write
-through it is rolled back and fails the call.
+`BinaryView`, so types and annotations can move directly between databases. Its
+transaction always rolls back; a detected write also fails the call.
 
 ### Saved functions
 
@@ -165,8 +165,9 @@ tabs, and the guide against a live Binary Ninja session using `tests/driver_plan
   accidental infinite loops and recursion are interrupted and rolled back. A core
   API call or code without a checkpoint may continue; it is marked abandoned and
   reverts when it finishes. Later calls wait meanwhile.
-- A failed call may bring the Binary Ninja window forward because reverting even an
-  empty undo transaction raises the window. The redraw is cosmetic.
+- A failed call or any use of `h.read_only_view()` may bring Binary Ninja forward
+  because reverting even an empty undo transaction raises the window. The redraw is
+  cosmetic.
 - Multi-tab discovery relies on untyped `binaryninjaui` APIs. If it fails, the plugin
   falls back to the current binary.
 
