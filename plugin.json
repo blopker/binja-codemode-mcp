@@ -14,10 +14,14 @@
     "text": "Copyright (C) 2026 BO LLC\n\nThis program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.\n\nThis program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.\n\nYou should have received a copy of the GNU General Public License along with this program. If not, see <https://www.gnu.org/licenses/>."
   },
   "platforms": [
-    "Darwin"
+    "Darwin",
+    "Linux",
+    "Windows"
   ],
   "installinstructions": {
-    "Darwin": "See README.md \u2014 symlink src/binja_codemode_mcp into your plugins folder."
+    "Darwin": "See README.md \u2014 symlink src/binja_codemode_mcp into your plugins folder.",
+    "Linux": "Install src/binja_codemode_mcp in Binary Ninja's user plugins directory.",
+    "Windows": "Install src/binja_codemode_mcp in Binary Ninja's user plugins directory."
   },
   "version": "0.2.0",
   "author": "Bo",

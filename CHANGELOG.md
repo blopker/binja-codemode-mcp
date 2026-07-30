@@ -15,7 +15,7 @@ A rewrite.
   transaction, so Binary Ninja's modified-tracking did not fire, the UI did not refresh,
   and edits could die with the process. Every `execute` now runs in one undo transaction:
   a script that raises reverts everything it did, and a batch that succeeds collapses to a
-  single ⌘Z.
+  single undo step.
 - **Only the first opened binary was reachable.** The server captured a `BinaryView` at
   start and never updated it, so a second tab was invisible and edits could land on a
   stale view. The target is now resolved independently for every request.
@@ -61,9 +61,9 @@ A rewrite.
 
 - Workspace files and saved skills. MCP clients have their own filesystem.
 - `checkpoint` and `rollback` tools.
-- **Headless support, and every platform but macOS.** This targets a running Binary Ninja
-  GUI; a Personal licence forbids headless anyway, so the code paths pretending otherwise
-  were untestable and misleading.
+- **Headless support.** This targets a running Binary Ninja GUI; a Personal licence
+  forbids headless anyway, so the code paths pretending otherwise were untestable and
+  misleading.
 
 ### Added
 

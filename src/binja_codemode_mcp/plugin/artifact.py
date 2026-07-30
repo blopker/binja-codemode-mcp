@@ -164,9 +164,10 @@ class ArtifactSink:
             ) from e
         except OSError as e:
             raise ArtifactError(
-                f"Could not publish artifact {destination}: "
-                f"{type(e).__name__}: {e}. Partial output remains at "
-                f"{self.partial_path}."
+                f"Could not publish artifact {destination} with an exclusive "
+                f"hard link: {type(e).__name__}: {e}. The output directory's "
+                "filesystem must support hard links and allow their creation. "
+                f"Partial output remains at {self.partial_path}."
             ) from e
         self.status = "success" if success else "failed"
         self.path = destination

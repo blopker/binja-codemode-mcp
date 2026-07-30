@@ -115,6 +115,20 @@ class TestSink:
         assert artifact.success_path.read_text() == "old"
         assert artifact.partial_path.read_text() == "new"
 
+    def test_publication_error_explains_the_hard_link_requirement(
+        self, tmp_path, monkeypatch
+    ):
+        artifact = sink(tmp_path)
+        artifact.write("saved")
+
+        def fail_link(_source, _destination):
+            raise OSError("hard links unavailable")
+
+        monkeypatch.setattr("os.link", fail_link)
+        with pytest.raises(ArtifactError, match="filesystem must support hard links"):
+            artifact.finish(True)
+        assert artifact.partial_path.read_text() == "saved"
+
     def test_limit_counts_utf8_bytes_and_preserves_valid_text(self, tmp_path):
         artifact = sink(tmp_path, max_bytes=5)
         with pytest.raises(ArtifactLimitError, match="0 MiB limit"):

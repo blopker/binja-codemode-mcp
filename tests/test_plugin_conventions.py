@@ -109,6 +109,8 @@ class TestPackaging:
         for field in ("name", "type", "api", "description", "license", "version"):
             assert field in metadata, field
         assert metadata["api"] == ["python3"]
+        assert metadata["platforms"] == ["Darwin", "Linux", "Windows"]
+        assert set(metadata["installinstructions"]) == {"Darwin", "Linux", "Windows"}
         assert metadata["version"] == project["project"]["version"] == VERSION
 
     def test_no_runtime_dependencies(self):

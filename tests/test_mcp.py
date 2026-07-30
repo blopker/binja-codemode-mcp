@@ -238,6 +238,22 @@ class TestTools:
         )
         assert "Output artifact (success, 1234 bytes): /tmp/generated.jsonl" in text
 
+    def test_artifact_publication_error_reaches_the_client(self, handler):
+        text = _text(
+            handler,
+            success=False,
+            output="preserved\n",
+            error=(
+                "Failed to finalize artifact output: the output directory's "
+                "filesystem must support hard links."
+            ),
+            artifact_path="/tmp/generated.jsonl.partial",
+            artifact_status="partial",
+            artifact_bytes=10,
+        )
+        assert "filesystem must support hard links" in text
+        assert "Output artifact (partial, 10 bytes)" in text
+
     def test_the_footer_lists_saved_library_functions(self, handler):
         """`h.lib` is invisible otherwise: the model cannot see what it saved
         two calls ago, and neither can anyone reading the transcript."""

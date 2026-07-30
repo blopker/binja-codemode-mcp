@@ -604,6 +604,8 @@ class PluginBackend:
             read_only=read_only,
             artifact_spec=artifact_spec,
         )
+        if result.artifact_error:
+            logger.error("%s", result.artifact_error)
         if result.timed_out:
             verdict = "timed out"
         elif result.success:

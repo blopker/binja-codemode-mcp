@@ -72,7 +72,8 @@ This regressed silently once — an optimisation gated the revert on `bv.file.mo
 which does not move when a script mutates — and was found by hand, not by the suite. Any
 renamed function here is a partial-state failure and the most serious possible result.
 
-**B3 — one undo step.** `bv.undo()` from a script is what ⌘Z does. First confirm you are
+**B3 — one undo step.** `bv.undo()` from a script is what the Undo command does. First
+confirm you are
 about to undo the right thing — `[len(e.actions) for e in bv.file.undo_entries][-3:]`
 should show B1's call as a single entry of **five** actions. Then undo once and read the
 five names back: expect all five reverted **together**, and `bv.redo()` to restore them.
@@ -214,7 +215,7 @@ Ask for all of this in one message, then stop.
    the only remaining check on view updates: the plugin used to force a refresh and no
    longer does, on the theory that undo-registered changes propagate on their own.
 2. Close the **`ls-b`** tab.
-3. Save `ls-a` (⌘S), close its tab, reopen the `.bndb`.
+3. Save `ls-a`, close its tab, reopen the `.bndb`.
 4. Glance at the log pane: every call should have logged what it was doing and which
    binary, then its verdict and elapsed time. Ask whether the failures said "rolled back".
 5. While a script is running, do **not** edit the database — a failed script reverts to

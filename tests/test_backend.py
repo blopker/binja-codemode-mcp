@@ -1,5 +1,6 @@
 """Wiring of session, executor, helpers and guide behind one backend."""
 
+import logging
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -69,6 +70,37 @@ class TestExecute:
         )
         assert not relative.success and "absolute" in (relative.error or "")
         assert not unsafe.success and "output_extension" in (unsafe.error or "")
+
+    def test_artifact_publication_failure_reaches_result_and_log(
+        self, backend, tmp_path, monkeypatch, caplog
+    ):
+        def fail_link(_source, _destination):
+            raise OSError("hard links unavailable")
+
+        logger = logging.getLogger("binja_codemode_mcp.plugin.backend")
+        old_level = logger.level
+        logger.addHandler(caplog.handler)
+        logger.setLevel(logging.ERROR)
+        monkeypatch.setattr("os.link", fail_link)
+        try:
+            result = backend.execute(
+                "print('preserved')",
+                output_directory=str(tmp_path),
+                output_extension="txt",
+            )
+        finally:
+            logger.removeHandler(caplog.handler)
+            logger.setLevel(old_level)
+
+        assert not result.success
+        assert result.artifact_status == "partial"
+        assert "filesystem must support hard links" in (result.error or "")
+        assert "transaction committed" in (result.error or "")
+        assert "before rerunning" in (result.error or "")
+        assert any(
+            "filesystem must support hard links" in record.getMessage()
+            for record in caplog.records
+        )
 
     def test_no_binary_open_is_a_clean_error(self, config):
         backend = PluginBackend(config, tabs_provider=list)

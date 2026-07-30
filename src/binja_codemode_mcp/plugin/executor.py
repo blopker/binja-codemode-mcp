@@ -146,6 +146,7 @@ class ExecutionResult:
     artifact_path: str | None = None
     artifact_status: str | None = None
     artifact_bytes: int = 0
+    artifact_error: str | None = None
 
 
 @dataclass
@@ -159,6 +160,7 @@ class _Outcome:
     """
 
     error: str | None = None
+    artifact_error: str | None = None
     reverted: bool = False  # set by the worker, read by the caller
     abandoned: bool = False  # set by the caller, read by the worker
     settling: bool = False  # the script finished; transactions are closing
@@ -603,10 +605,24 @@ class CodeExecutor:
                         else:
                             output.discard()
                     except BaseException as e:
-                        note = (
+                        cause = (
                             f"Failed to finalize artifact output: "
                             f"{type(e).__name__}: {e}"
                         )
+                        if outcome.error:
+                            note = cause
+                        elif outcome.reverted:
+                            note = (
+                                "The script finished and its transaction was rolled "
+                                f"back, but {cause[0].lower()}{cause[1:]}"
+                            )
+                        else:
+                            note = (
+                                "The script finished and its transaction committed, "
+                                f"but {cause[0].lower()}{cause[1:]} Check the database "
+                                "before rerunning the script."
+                            )
+                        outcome.artifact_error = note
                         outcome.error = (
                             f"{outcome.error}\n\n{note}" if outcome.error else note
                         )
@@ -688,6 +704,7 @@ class CodeExecutor:
                     + (f"\n\n{artifact_failure}" if artifact_failure else "")
                 ),
                 timed_out=True,
+                artifact_error=artifact_failure,
                 **output.artifact_fields(),
             )
 
@@ -701,6 +718,7 @@ class CodeExecutor:
                 elapsed_s=elapsed,
                 timeout_s=self.timeout,
                 reverted=outcome.reverted,
+                artifact_error=outcome.artifact_error,
                 **output.artifact_fields(),
             )
         return ExecutionResult(

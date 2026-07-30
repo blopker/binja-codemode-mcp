@@ -6,7 +6,7 @@ real `BinaryView` API—no wrapper dialect.
 Each call runs in one undo transaction. An exception reverts its changes; a successful
 batch is one undo step.
 
-Currently tested on macOS with the Binary Ninja Personal GUI.
+Currently tested with the Binary Ninja Personal GUI.
 
 ## Install
 
