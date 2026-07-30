@@ -422,6 +422,24 @@ class TestLibrary:
         )
         assert result.output.strip() == "ab"
 
+    def test_a_stored_helper_does_not_retain_its_defining_scope(self, backend):
+        backend.execute(
+            "def helper():\n    return bv\n"
+            "def top():\n    return helper()\n"
+            'h.lib["top"] = top'
+        )
+        helper = backend.helpers.lib._entries["top"].captured["helper"]
+        assert helper.__globals__ == {}
+
+    def test_a_rebound_helper_keeps_keyword_defaults(self, backend):
+        result = backend.execute(
+            "def helper(*, limit=5):\n    return limit\n"
+            "def top():\n    return helper()\n"
+            'h.lib["top"] = top\nprint(h.lib.top())'
+        )
+        assert result.success
+        assert result.output.strip() == "5"
+
     def test_redefining_an_entry_mid_script_takes_effect(self, backend):
         """A per-entry globals cache made the first definition win, so fixing a
         saved function and re-testing it in one call silently ran the old one."""
@@ -615,10 +633,10 @@ class TestLibrary:
         """Silently omitting it would produce a dump that looks complete and
         is not."""
         backend.execute(
-            'HANDLE = object()\ndef uses():\n    return HANDLE\nh.lib["uses"] = uses'
+            "SPAN = range(3)\ndef uses():\n    return SPAN\nh.lib['uses'] = uses"
         )
         dump = backend.execute("print(h.lib_sources())").output
-        assert "HANDLE" in dump
+        assert "SPAN" in dump
         assert "re-supply this by hand" in dump
 
     def test_the_listing_shows_signature_and_docstring(self, backend):
@@ -679,6 +697,14 @@ class TestLibrary:
         assert "BinaryView" in (result.error or "")
         assert "default argument" in (result.error or "")
 
+    def test_a_view_nested_in_a_default_is_refused(self, backend):
+        result = backend.execute(
+            'def where(sources=[bv]):\n    return sources[0]\nh.lib["where"] = where'
+        )
+        assert not result.success
+        assert "BinaryView" in (result.error or "")
+        assert "default argument 1[0]" in (result.error or "")
+
     def test_a_view_held_through_a_top_level_name_is_refused(self, backend):
         result = backend.execute(
             "src = bv\ndef where():\n    return src.file.filename\n"
@@ -687,12 +713,29 @@ class TestLibrary:
         assert not result.success
         assert "top-level name 'src'" in (result.error or "")
 
+    def test_a_view_nested_in_a_top_level_mapping_is_refused(self, backend):
+        result = backend.execute(
+            "state = {'source': bv}\ndef where():\n    return state['source']\n"
+            'h.lib["where"] = where'
+        )
+        assert not result.success
+        assert "BinaryView" in (result.error or "")
+        assert "['source']" in (result.error or "")
+
     def test_a_view_held_through_an_annotation_is_refused(self, backend):
         result = backend.execute(
             'def where(x: bv = 1):\n    return x\nh.lib["where"] = where'
         )
         assert not result.success
         assert "annotation" in (result.error or "")
+
+    def test_a_view_nested_in_a_generic_alias_is_refused(self, backend):
+        result = backend.execute(
+            'def where(x: list[bv] = None):\n    return x\nh.lib["where"] = where'
+        )
+        assert not result.success
+        assert "BinaryView" in (result.error or "")
+        assert "argument 1" in (result.error or "")
 
     def test_the_refusal_says_to_take_the_view_as_a_parameter(self, backend):
         """The message has to name the fix, or it just moves the guessing."""
@@ -709,6 +752,88 @@ class TestLibrary:
         )
         assert result.success
         assert result.output.strip() == "(5, False)"
+
+    def test_nested_plain_containers_are_accepted(self, backend):
+        result = backend.execute(
+            "CONFIG = {'limits': [2, 5], 'flags': {True}}\n"
+            "def top():\n    return CONFIG['limits'][-1]\n"
+            'h.lib["top"] = top\nprint(h.lib.top())'
+        )
+        assert result.success
+        assert result.output.strip() == "5"
+
+    def test_cyclic_plain_containers_do_not_recurse_forever(self, backend):
+        result = backend.execute(
+            "CYCLE = []\nCYCLE.append(CYCLE)\n"
+            "def depth():\n    return CYCLE[0] is CYCLE\n"
+            'h.lib["depth"] = depth\nprint(h.lib.depth())'
+        )
+        assert result.success
+        assert result.output.strip() == "True"
+
+    def test_an_opaque_stateful_capture_is_refused(self, backend):
+        result = backend.execute(
+            "class Box:\n    pass\n"
+            "box = Box()\ndef get_box():\n    return box\n"
+            'h.lib["get_box"] = get_box'
+        )
+        assert not result.success
+        assert "opaque stateful Box" in (result.error or "")
+
+    def test_a_captured_helper_closure_is_refused(self, backend):
+        result = backend.execute(
+            "def make_helper():\n"
+            "    source = bv\n"
+            "    def helper():\n"
+            "        return source\n"
+            "    return helper\n"
+            "helper = make_helper()\n"
+            "def indirect():\n"
+            "    return helper()\n"
+            'h.lib["indirect"] = indirect'
+        )
+        assert not result.success
+        assert "helper function with a closure" in (result.error or "")
+
+    def test_a_helper_attribute_cannot_hide_a_view(self, backend):
+        result = backend.execute(
+            "def helper():\n    pass\n"
+            "helper.source = bv\n"
+            "def indirect():\n    return helper.source\n"
+            'h.lib["indirect"] = indirect'
+        )
+        assert not result.success
+        assert "BinaryView" in (result.error or "")
+        assert "attribute 'source'" in (result.error or "")
+
+    def test_a_function_nested_in_retained_state_is_refused(self, backend):
+        result = backend.execute(
+            "def helper():\n    return bv\n"
+            "state = [helper]\n"
+            "def indirect():\n    return state[0]()\n"
+            'h.lib["indirect"] = indirect'
+        )
+        assert not result.success
+        assert "function nested in retained state" in (result.error or "")
+
+    def test_a_bound_method_cannot_hide_a_view(self, backend):
+        result = backend.execute(
+            "take = [bv].pop\n"
+            "def indirect():\n    return take()\n"
+            'h.lib["indirect"] = indirect'
+        )
+        assert not result.success
+        assert "BinaryView" in (result.error or "")
+        assert "receiver" in (result.error or "")
+
+    def test_a_script_defined_class_is_refused(self, backend):
+        result = backend.execute(
+            "class State:\n    source = bv\n"
+            "def indirect():\n    return State.source\n"
+            'h.lib["indirect"] = indirect'
+        )
+        assert not result.success
+        assert "stateful script-defined class" in (result.error or "")
 
     def test_a_function_from_another_module_is_refused(self, backend):
         """Rebinding it would strip the globals its own module needs."""

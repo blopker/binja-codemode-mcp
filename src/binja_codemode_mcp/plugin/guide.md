@@ -191,9 +191,10 @@ Only functions can be saved. They run with the current call's `bv`, `bn`, `h`, a
 `print`; pass live database values as arguments instead of capturing them. Use
 `print(h.lib)` to list entries and `h.lib_sources()` to export them.
 
-Referenced imports, constants, and top-level helpers travel with a saved function;
-names defined by a later caller do not. Inspect `h.lib.name.source`, and call saved
-functions from each other through `h.lib.name()`.
+Referenced imports, plain data, and top-level helpers travel with a saved function;
+stateful objects must be constructed inside it or passed as arguments. Names defined
+by a later caller do not. Inspect `h.lib.name.source`, and call saved functions from
+each other through `h.lib.name()`.
 
 ## Verification
 

@@ -106,7 +106,8 @@ h.lib["name"] = function
 
 Call one later as `h.lib.name()`. It runs against the current database rather than
 caching a result. `print(h.lib)` lists saved functions and `h.lib_sources()` exports
-them.
+them. Captures are limited to imports, functions, and plain data; pass live or
+stateful objects as arguments.
 
 ## Configuration and safety
 

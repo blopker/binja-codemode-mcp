@@ -13,7 +13,7 @@ import linecache
 import types
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, get_args
 
 from ..config import Config
 from .executor import (
@@ -60,11 +60,155 @@ def _holds_a_view(value: Any) -> bool:
     Duck-typed on three attributes that only a view carries together, so this
     stays true in tests and in the host alike.
     """
+    try:
+        for name in ("file", "functions", "start"):
+            inspect.getattr_static(value, name)
+    except AttributeError:
+        return False
+    return True
+
+
+_SAFE_CAPTURE_LEAVES = (
+    type(None),
+    bool,
+    int,
+    float,
+    complex,
+    str,
+    bytes,
+    range,
+    type(Ellipsis),
+    type(NotImplemented),
+)
+
+
+def _capture_problem(
+    value: Any,
+    path: str,
+    seen: set[int] | None = None,
+    *,
+    allow_helper: bool = False,
+) -> str | None:
+    """Why retaining value in h.lib is unsafe, or None for bounded state.
+
+    Traverse only containers whose contents are well-defined without running
+    user code. Arbitrary objects can hide a BinaryView in attributes or slots,
+    so accepting one would recreate the same stale-view hole under a wrapper.
+    """
+    if _holds_a_view(value):
+        return f"{path} contains a BinaryView"
+    if isinstance(value, _SAFE_CAPTURE_LEAVES):
+        return None
+    if isinstance(value, types.ModuleType):
+        return None  # imports are rebuilt as globals and are expected captures
+
+    if seen is None:
+        seen = set()
+    identity = id(value)
+    if identity in seen:
+        return None
+    seen.add(identity)
+
+    if isinstance(value, (types.GenericAlias, types.UnionType)) or (
+        type(value).__module__ == "typing"
+    ):
+        for index, item in enumerate(get_args(value)):
+            problem = _capture_problem(item, f"{path} argument {index + 1}", seen)
+            if problem:
+                return problem
+        return None
+
+    if isinstance(value, type):
+        if value.__module__ == "__binja_mcp__":
+            return f"{path} is a stateful script-defined class"
+        return None
+
+    if isinstance(value, types.BuiltinFunctionType):
+        receiver = value.__self__
+        if receiver is None or isinstance(receiver, types.ModuleType):
+            return None
+        return _capture_problem(receiver, f"{path} receiver", seen)
+
+    if isinstance(value, slice):
+        for name in ("start", "stop", "step"):
+            problem = _capture_problem(getattr(value, name), f"{path}.{name}", seen)
+            if problem:
+                return problem
+        return None
+
+    if type(value) in (list, tuple):
+        for index, item in enumerate(value):
+            problem = _capture_problem(item, f"{path}[{index}]", seen)
+            if problem:
+                return problem
+        return None
+
+    if type(value) in (set, frozenset):
+        for index, item in enumerate(value):
+            problem = _capture_problem(item, f"{path} item {index}", seen)
+            if problem:
+                return problem
+        return None
+
+    if type(value) is dict:
+        for index, (key, item) in enumerate(value.items()):
+            problem = _capture_problem(key, f"{path} key {index}", seen)
+            if problem:
+                return problem
+            problem = _capture_problem(item, f"{path}[{key!r}]", seen)
+            if problem:
+                return problem
+        return None
+
+    if isinstance(value, types.FunctionType):
+        if not allow_helper:
+            return (
+                f"{path} is a function nested in retained state; "
+                "keep helpers as direct top-level names"
+            )
+        if value.__closure__ is not None:
+            return f"{path} is a helper function with a closure"
+        for index, item in enumerate(value.__defaults__ or ()):
+            problem = _capture_problem(
+                item, f"{path} default argument {index + 1}", seen
+            )
+            if problem:
+                return problem
+        for name, item in (value.__kwdefaults__ or {}).items():
+            problem = _capture_problem(item, f"{path} default for {name}", seen)
+            if problem:
+                return problem
+        for name, item in getattr(value, "__annotations__", {}).items():
+            problem = _capture_problem(item, f"{path} annotation on {name}", seen)
+            if problem:
+                return problem
+        for name, item in vars(value).items():
+            problem = _capture_problem(item, f"{path} attribute {name!r}", seen)
+            if problem:
+                return problem
+        return None
+
     return (
-        hasattr(value, "file")
-        and hasattr(value, "functions")
-        and hasattr(value, "start")
+        f"{path} is an opaque stateful {type(value).__name__}; "
+        "construct it inside the function or pass it as an argument"
     )
+
+
+def _detach_script_helper(value: Any) -> Any:
+    """Drop a helper's defining globals before retaining it."""
+    if not (
+        isinstance(value, types.FunctionType)
+        and value.__code__.co_filename.startswith(SCRIPT_PREFIX)
+    ):
+        return value
+    detached = types.FunctionType(
+        value.__code__, {}, value.__name__, value.__defaults__, None
+    )
+    detached.__kwdefaults__ = value.__kwdefaults__
+    detached.__doc__ = value.__doc__
+    detached.__annotations__ = dict(value.__annotations__)
+    detached.__dict__.update(value.__dict__)
+    return detached
 
 
 def _referenced_names(code: types.CodeType) -> set[str]:
@@ -126,18 +270,15 @@ class _Library:
                 f"{key!r} must be defined in your script. A function from elsewhere "
                 f"({origin}) needs its own module's globals, which rebinding removes."
             )
-        # A view reached through a default, an annotation or a captured name is
-        # the same staleness the closure check refuses, wearing a different hat
-        # — and worse now that a saved function is meant to run against whatever
-        # binary the call targets. `def f(src=bv)` is the shape the closure
-        # message actively recommends, so it has to be caught here.
-        pinned = _pinned_views(fn, self._scope())
-        if pinned:
+        # Retained values outlive this call. Keep only bounded plain data and
+        # helpers that can be rebound safely to a later call's live globals.
+        unsafe = _unsafe_captures(fn, self._scope())
+        if unsafe:
             raise ValueError(
-                f"{key!r} holds a BinaryView through {pinned}. It would still "
-                "point at this call's binary when you run it against another "
-                "target, outside that target's transaction. Take the view as a "
-                "parameter and pass bv or h.read_only_view(name) at the call."
+                f"{key!r} cannot be saved because {unsafe}. Retained state can "
+                "go stale or point outside a later call's transaction. Take live "
+                "values as parameters and pass bv or h.read_only_view(name) at "
+                "the call."
             )
 
         try:
@@ -155,7 +296,7 @@ class _Library:
         defining = self._scope() or fn.__globals__
         wanted = _referenced_names(fn.__code__)
         captured = {
-            name: value
+            name: _detach_script_helper(value)
             for name, value in defining.items()
             if name in wanted and name not in LIVE_GLOBALS and name != "__builtins__"
         }
@@ -215,9 +356,14 @@ class _Library:
             if not isinstance(value, types.FunctionType):
                 continue
             if value.__code__.co_filename.startswith(SCRIPT_PREFIX):
-                merged[name] = types.FunctionType(
+                helper = types.FunctionType(
                     value.__code__, merged, name, value.__defaults__, value.__closure__
                 )
+                helper.__kwdefaults__ = value.__kwdefaults__
+                helper.__doc__ = value.__doc__
+                helper.__annotations__ = dict(value.__annotations__)
+                helper.__dict__.update(value.__dict__)
+                merged[name] = helper
 
         fn = types.FunctionType(rec.code, merged, key, rec.defaults, None)
         fn.__kwdefaults__ = rec.kwdefaults
@@ -354,24 +500,34 @@ def _render_captured(captured: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n\n" if lines else ""
 
 
-def _pinned_views(fn: Any, scope: dict[str, Any] | None) -> str:
-    """Names a saved function would carry a BinaryView through, if any."""
-    found: list[str] = []
+def _unsafe_captures(fn: Any, scope: dict[str, Any] | None) -> str | None:
+    """The first value a saved function cannot safely retain."""
+    seen: set[int] = set()
     for i, value in enumerate(fn.__defaults__ or ()):
-        if _holds_a_view(value):
-            found.append(f"default argument {i + 1}")
+        problem = _capture_problem(value, f"default argument {i + 1}", seen)
+        if problem:
+            return problem
     for name, value in (fn.__kwdefaults__ or {}).items():
-        if _holds_a_view(value):
-            found.append(f"the default for {name}")
+        problem = _capture_problem(value, f"the default for {name}", seen)
+        if problem:
+            return problem
     for name, value in getattr(fn, "__annotations__", {}).items():
-        if _holds_a_view(value):
-            found.append(f"the annotation on {name}")
+        problem = _capture_problem(value, f"the annotation on {name}", seen)
+        if problem:
+            return problem
     if scope:
         wanted = _referenced_names(fn.__code__)
         for name, value in scope.items():
-            if name in wanted and name not in LIVE_GLOBALS and _holds_a_view(value):
-                found.append(f"the top-level name {name!r}")
-    return ", ".join(found)
+            if name in wanted and name not in LIVE_GLOBALS:
+                problem = _capture_problem(
+                    value,
+                    f"the top-level name {name!r}",
+                    seen,
+                    allow_helper=True,
+                )
+                if problem:
+                    return problem
+    return None
 
 
 class Helpers:
