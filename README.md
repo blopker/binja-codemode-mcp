@@ -178,15 +178,8 @@ tabs, and the guide against a live Binary Ninja session using `tests/driver_plan
 
 ## Known limitations
 
-- Submitted loops and function entries contain cooperative timeout checks, so
-  accidental infinite loops and recursion are interrupted and rolled back. A core
-  API call or code without a checkpoint may continue; it is marked abandoned and
-  reverts when it finishes. Later calls wait meanwhile.
-- A failed call or any use of `h.read_only_view()` may bring Binary Ninja forward
-  because reverting even an empty undo transaction raises the window. The redraw is
-  cosmetic.
-- Multi-tab discovery relies on untyped `binaryninjaui` APIs. If it fails, the plugin
-  falls back to the current binary.
+- Some MCP calls may make the Binary Ninja window pop to the foreground. This is an API
+  limitation. To avoid interruptions while working, minimize Binary Ninja.
 
 ## License
 
