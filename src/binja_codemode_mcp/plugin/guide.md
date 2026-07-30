@@ -2,34 +2,32 @@
 
 ## Safety
 
-- Change only what the evidence supports. Put uncertainty in a comment.
+- Change only what evidence supports; put uncertainty in a comment.
 - Each call is one undo transaction on `target`; an exception rolls it back.
-- Calls time out after 30 seconds. Filter before iterating and split large jobs; use
-  the `[1.4s of 30s]` result footer to size the next batch.
-- `print()` returns a 32 KB preview; errors keep their last 4 KB. For complete
-  output, pass an existing absolute `output_directory` and an alphanumeric
-  `output_extension`. The server streams at most 100 MiB to a generated file,
-  using `.partial` while running and `.failed` on error. Print addresses as hex.
+- Calls time out after 30 seconds. Filter, split large jobs, and use the timing footer.
+- `print()` returns 32 KB; errors keep their last 4 KB. Complete output needs an
+  absolute `output_directory` and alphanumeric `output_extension`; it streams at
+  most 100 MiB to a generated `.partial`, renamed `.failed` on error. Print
+  addresses as hex.
 - Do not call Qt, `binaryninjaui`, or `PySide6`: scripts run off the GUI thread.
-- Do not use `bv` or `h.read_only_view()` as a context manager; exiting closes the
-  user's view. A view opened by `bn.load(path)` is yours and may use `with`.
-- Keep calls short if the user is active: rolling back a failed call also rewinds GUI
-  edits made after its transaction began.
+- Do not use handed views as a context manager; exiting closes the user's view.
+  A view opened by `bn.load(path)` is yours and may use `with`.
+- A rollback also rewinds GUI edits made after the call began.
 
 ## Environment
 
-`bv` is the real `BinaryView` selected by `target` and the only writable view; `bn`
-is `binaryninja`. Omit `target` only when one binary is open. Set `read_only=true`
-for queries: every view rolls back and analysis/cache notifications are ignored.
+`bv` is the real `target` `BinaryView` and the only writable view; `bn` is
+`binaryninja`. Omit `target` only with one binary open. Use `read_only=true` for
+queries; all views roll back and analysis/cache notifications are ignored.
 
 - `h.binaries()` lists open binaries and stable IDs such as `binary-42`.
 - `target` and `h.read_only_view()` accept an ID, unique name, or path.
-- `h.read_only_view(id)` opens another tab for reading. Its transaction always
-  rolls back; a detected write also fails the call after the script finishes.
+- `h.read_only_view(id)` reads another tab; its transaction always rolls back and
+  a detected write fails the call after the script finishes.
 - Normal Python, imports, and filesystem access work. Use `bv.read(address, length)`
   for mapped bytes; `bv.file.original_filename` names the original file.
 
-Never decompile every function. Select a few first:
+Select functions before decompiling:
 
 ```python
 hits = [f for f in bv.functions if "parse" in f.name]
@@ -37,16 +35,32 @@ for f in hits[:10]:
     print(hex(f.start), f.name)
 ```
 
+## Address layout
+
+`rebase_view` relocates an established database. Direct `bv.rebase()` is blocked
+because it replaces the transactional view. The tool requires a clean
+BNDB, writes a timestamped sibling backup, may reanalyze, and verifies the result.
+
+Non-relocatable images need `allow_non_relocatable=true`; prefer `bv.memory_map`
+for raw firmware. A region maps data; a section only labels mapped addresses. For
+a header, read payload bytes from `bv.file.raw` at their file offset and add a
+region at the virtual base. Changes support undo and persist; legacy auto-segment
+removal may not.
+
+`bv.entry_point` is the loader entry; user entries are in `bv.entry_functions` and
+added with `bv.add_entry_point(addr)`. `bv.modified` reports unsaved changes,
+`bv.has_database` a BNDB, and `bv.save_auto_snapshot()` persists its current state.
+
 ## Querying
 
-For one instruction, use `bv.get_disassembly(addr)`. Keep output bounded:
+Use `bv.get_disassembly(addr)` for one instruction. Bound output:
 
 ```python
 for addr in addresses[start:start + 50]:
     print(hex(addr), bv.get_disassembly(addr))
 ```
 
-Address lookups are not interchangeable:
+Address lookups differ:
 
 - `get_symbol_at(addr)` requires an exact address.
 - `get_data_var_at(addr)` may return an object containing `addr`.
@@ -61,14 +75,14 @@ for ref in bv.get_code_refs(addr, length):
 print([hex(a) for a in bv.get_data_refs(addr, length)])
 ```
 
-`bv.sections` and `bv.data_vars` are mappings; iterate `.values()`. `bv.segments` is
-a list. Read short C strings with `bv.get_ascii_string_at(addr, 1)`.
+`bv.sections` and `bv.data_vars` are mappings; `bv.segments` is a list. Read short
+C strings with `bv.get_ascii_string_at(addr, 1)`.
 
-Before typing a blob, inspect its bytes, analysis, references, and consumers.
-Consumers reveal stride, field offsets, signedness, and explicit lengths.
+Before typing a blob, inspect bytes, references, and consumers for stride, offsets,
+signedness, and lengths.
 
-For a large function, inspect a small IL window. IL instructions are not guaranteed
-to be in address order, and many machine-code addresses have no exact HLIL item:
+Inspect a bounded IL window; IL order is not guaranteed and many addresses have no
+exact HLIL item:
 
 ```python
 f = bv.get_functions_containing(addr)[0]
@@ -76,6 +90,9 @@ items = [i for i in f.hlil.instructions if abs(i.address - addr) < 0x40]
 for i in sorted(items, key=lambda x: x.address):
     print(hex(i.address), i)
 ```
+
+IL operands are recursive; use `instruction.traverse(...)` rather than assuming a
+convenience property such as `.constants` exists.
 
 ## Types and data
 
@@ -89,8 +106,7 @@ bv.define_user_type("record_t", t)
 print(bv.get_type_by_name("record_t").width)
 ```
 
-Always verify a defined type's width; correct-looking fields with wrong packing or
-alignment still produce bad decompilation.
+Verify type width; wrong packing or alignment produces bad decompilation.
 
 `parse_types_from_string` returns a `BasicTypeParserResult`:
 
@@ -100,8 +116,8 @@ for name, t in result.types.items():
     bv.define_user_type(name, t)
 ```
 
-Give data variables an explicit string name and verify the result. Guard lookups:
-an exception during verification rolls back the definition.
+Give data variables a string name and verify the result; guard lookups because an
+exception rolls the definition back.
 
 ```python
 t, _ = bv.parse_type_string("record_t[8]")
@@ -125,9 +141,8 @@ if sym:
     bv.undefine_auto_symbol(sym) if sym.auto else bv.undefine_user_symbol(sym)
 ```
 
-Only undefine an exact object start. An interior `get_data_var_at()` returns the
-enclosing variable; deleting it by the queried interior address removes the wrong
-thing. After redefining a range, check that stale interior symbols are gone.
+Only undefine an exact object start: an interior `get_data_var_at()` returns the
+enclosing variable. After redefining a range, check for stale interior symbols.
 
 ## Functions
 
@@ -144,8 +159,8 @@ Assigning a `Type` object changes only the prototype; set `f.name` separately.
 Use `bv.remove_user_function(f)` to remove a function persistently. Do not use
 `bv.undo()` inside a call; raise an exception to roll back the transaction.
 
-Recover return type, parameter names and types, widths, signedness, pointers, `const`,
-and calling convention. Re-read HLIL; named fields and indexes help confirm the type.
+Recover return and parameter types, widths, signedness, pointers, `const`, and
+calling convention. Re-read HLIL to confirm them.
 
 ## Multiple binaries
 
@@ -161,8 +176,8 @@ if old and new and not old.symbol.auto:
     new.name = old.name
 ```
 
-Addresses match only for equivalent layouts. For changed builds, match with stable
-evidence such as bytes, symbols, strings, or call relationships.
+Addresses match only for equivalent layouts; otherwise match bytes, symbols,
+strings, or call relationships.
 
 `Type` objects can move directly between live views:
 
@@ -172,9 +187,6 @@ if t:
     bv.define_user_type("config_t", t)
 ```
 
-Direct transfer preserves widths, parameter names, and calling conventions. Avoid
-round-tripping through C text unless necessary.
-
 To identify user annotations:
 
 - symbol: `not sym.auto`
@@ -182,28 +194,25 @@ To identify user annotations:
 - function variable: `f.is_var_user_defined(var)`
 - type: present in `bv.user_type_container.types`
 
-Iterate `f.vars` when checking local annotations; `f.parameter_vars` contains only
-arguments.
+Check `f.vars`; `f.parameter_vars` contains only arguments.
 
 ## Saved functions
 
-Calls share no variables or imports. Store reusable code with the
-`define_lib_function` tool, passing one complete definition:
+Calls share no variables or imports. Pass one complete definition to
+`define_lib_function`:
 
 ```python
 def named(view):
     return [(f.start, f.name) for f in view.functions if not f.symbol.auto]
 ```
 
-Then call `h.lib.named(bv)` from `execute`. The namespace is read-only there.
-Definitions run with that call's `bv`, `bn`, `h`, and `print`; put imports and helpers
-inside, pass other values as arguments, and use only immutable literal defaults.
-Annotations are not retained. Use `list_lib_functions` to inspect definitions and
-`remove_lib_function` to delete one. Calls to `h.lib.other()` resolve dynamically, so
-removing `other` makes the caller fail normally.
+Call `h.lib.named(bv)` from `execute`; the namespace is read-only. Definitions use
+that call's globals. Put imports and helpers inside, pass other values, and use
+immutable literal defaults. Annotations are not retained. Inspect with
+`list_lib_functions`, delete with `remove_lib_function`. Calls to `h.lib.other()`
+resolve dynamically; removing `other` makes its caller fail normally.
 
 ## Verification
 
-Read edits back and inspect the resulting IL. For tables, check sample records,
-width, count, stride, padding, and boundaries. Verify comments with
-`bv.get_comment_at(addr)`.
+Read edits back and inspect IL. For tables, check width, count, stride, padding,
+and boundaries. Verify comments with `bv.get_comment_at(addr)`.

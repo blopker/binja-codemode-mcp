@@ -75,6 +75,7 @@ def test_full_session(client, bv):
         "define_lib_function",
         "list_lib_functions",
         "remove_lib_function",
+        "rebase_view",
         "binja_guide",
     ]
 

@@ -19,6 +19,7 @@ class _StubModule(types.ModuleType):
     log_info: Callable[[str], None]
     log_warn: Callable[[str], None]
     list_tabs: Callable[[], list[Any]]
+    rebase_current_view: Callable[[Any, int], Any]
     update_status: Callable[..., None]
 
 
@@ -44,6 +45,7 @@ def commands_module(monkeypatch):
 
     uicontext = _StubModule("binja_codemode_mcp.plugin.uicontext")
     uicontext.list_tabs = lambda: []
+    uicontext.rebase_current_view = lambda view, address: view
     widget = _StubModule("binja_codemode_mcp.plugin.widget")
     widget.update_status = lambda running, *, shutting_down=False: statuses.append(
         (running, shutting_down)

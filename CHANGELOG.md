@@ -67,6 +67,11 @@ A rewrite.
 
 ### Added
 
+- **Guarded UI rebasing.** `rebase_view` creates a non-overwriting timestamped BNDB
+  backup, invokes Binary Ninja's view-replacing UI operation, reacquires the live view,
+  and verifies its memory map, sampled bytes, annotations, and optional analysis entry.
+  Non-relocatable images require explicit opt-in. Direct `bv.rebase()` inside `execute`
+  is refused; the guide covers `bv.memory_map` for offset-aware raw firmware layouts.
 - **`h.lib`, a per-session function library.** Define, inspect, and remove self-contained
   functions with dedicated MCP tools, then call them from `execute` as `h.lib.name()`.
   The namespace is read-only inside scripts and resolves library dependencies dynamically.

@@ -192,6 +192,23 @@ class TestGuideContent:
         ):
             assert idiom in text, idiom
 
+    def test_distinguishes_rebase_memory_map_sections_and_entries(self):
+        text = guide_text()
+        assert "rebase_view" in text
+        assert "timestamped sibling backup" in text
+        assert "allow_non_relocatable=true" in text
+        assert "bv.memory_map" in text
+        assert "section only labels" in text
+        assert "bv.entry_point" in text
+        assert "bv.entry_functions" in text
+
+    def test_documents_il_traversal_and_database_state(self):
+        text = guide_text()
+        assert ".traverse" in text
+        assert "bv.modified" in text
+        assert "bv.has_database" in text
+        assert "save_auto_snapshot" in text
+
     def test_covers_working_across_two_databases(self):
         """The task the tool is uniquely suited to — two binaries open at
         once — had no section at all until a real port needed one."""

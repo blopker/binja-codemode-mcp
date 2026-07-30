@@ -18,7 +18,7 @@ case seems to need the interface, record it as a gap.
 Record any traceback, unexpected tool error, or disagreement between a tool and the UI as
 a failure rather than working around it. The workaround is the finding.
 
-Pass `topic` to `binja_guide` except where told otherwise — the whole guide is ~27 KB,
+Pass `topic` to `binja_guide` except where told otherwise — the whole guide is ~8 KB,
 two thirds of a result, and one section is usually what you want.
 
 Cases leave this plan once the suite covers them and several runs have passed them, so

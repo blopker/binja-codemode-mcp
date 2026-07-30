@@ -67,6 +67,29 @@ class _Abandoned(BaseException):
     """
 
 
+class ScriptRejected(ValueError):
+    """A known-unsafe operation must use a dedicated MCP tool."""
+
+
+class ExecutorBusyError(RuntimeError):
+    """Another operation still owns the executor's serialization lock."""
+
+
+class _UnsafeCallCheck(ast.NodeVisitor):
+    def visit_Call(self, node: ast.Call) -> None:
+        if (
+            isinstance(node.func, ast.Attribute)
+            and node.func.attr == "rebase"
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "bv"
+        ):
+            raise ScriptRejected(
+                "Do not call bv.rebase() from execute: it replaces the live view "
+                "outside this call's undo transaction. Use the rebase_view tool."
+            )
+        self.generic_visit(node)
+
+
 class _GuardCheckpoints(ast.NodeTransformer):
     """Add cooperative timeout checks at loop iterations and function entry."""
 
@@ -127,6 +150,7 @@ def compile_script(code: str, name: str, *, defer_annotations: bool = False) -> 
     setup or settlement.
     """
     tree = ast.parse(code, name, "exec")
+    _UnsafeCallCheck().visit(tree)
     tree = _GuardCheckpoints().visit(tree)
     ast.fix_missing_locations(tree)
     flags = __future__.annotations.compiler_flag if defer_annotations else 0
@@ -428,6 +452,33 @@ class CodeExecutor:
         self._idle = threading.Event()
         self._idle.set()
 
+    @contextlib.contextmanager
+    def exclusive_operation(self, target_name: str) -> Any:
+        """Serialize a non-script operation against scripts and settlement."""
+        if not self._busy.acquire(timeout=self.queue_wait):
+            raise ExecutorBusyError(self._busy_message())
+        self._started_at = time.time()
+        self._running_target = target_name
+        self._idle.clear()
+        try:
+            yield
+        finally:
+            self._started_at = None
+            self._running_target = None
+            self._idle.set()
+            self._busy.release()
+
+    def _busy_message(self) -> str:
+        started_at = self._started_at
+        running_for = time.time() - started_at if started_at else 0.0
+        on = self._running_target
+        whose = f" on {on}" if on else ""
+        return (
+            f"Waited {self.queue_wait:.0f}s, but a previous operation is still "
+            f"running{whose} ({running_for:.0f}s so far). Wait for it, or restart "
+            "Binary Ninja if it is wedged."
+        )
+
     def execute(
         self,
         code: str,
@@ -457,25 +508,18 @@ class CodeExecutor:
             compiled = compile_script(code, script_name)
         except SyntaxError as e:
             return ExecutionResult(success=False, output="", error=f"Syntax error: {e}")
+        except ScriptRejected as e:
+            return ExecutionResult(success=False, output="", error=str(e))
 
         # Queue rather than refuse. Clients issue tool calls in parallel and the
         # ordinary script finishes in well under a second, so an instant refusal
         # turned a collision that would have resolved itself into a failure the
         # model had to understand and retry.
         if not self._busy.acquire(timeout=self.queue_wait):
-            started_at = self._started_at
-            running_for = time.time() - started_at if started_at else 0.0
-            on = self._running_target
-            whose = f" on {on}" if on else ""
             return ExecutionResult(
                 success=False,
                 output="",
-                error=(
-                    f"Waited {self.queue_wait:.0f}s, but a previous script is still "
-                    f"running{whose} ({running_for:.0f}s so far) and cannot be "
-                    "interrupted. Its changes will be discarded when it finishes. "
-                    "Wait for it, or restart Binary Ninja if it is wedged."
-                ),
+                error=self._busy_message(),
             )
 
         # Everything from here to the worker's `finally` must be exception-safe:

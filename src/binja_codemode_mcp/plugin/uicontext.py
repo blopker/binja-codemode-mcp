@@ -105,3 +105,52 @@ def list_tabs() -> list[BinaryTab]:
 
     execute_on_main_thread_and_wait(gather)
     return result[0] if result else []
+
+
+def rebase_current_view(view: Any, address: int) -> Any:
+    """Rebase the tab containing ``view`` and return its replacement view."""
+    result: list[Any] = []
+    error: list[str] = []
+
+    def rebase() -> None:
+        try:
+            session_id = int(view.file.session_id)
+            for ctx in UIContext.allContexts():
+                tab = ctx.getTabForSessionId(session_id)
+                if tab is None:
+                    continue
+                frame = ctx.getViewFrameForTab(tab)
+                current = frame.getCurrentBinaryView() if frame else None
+                if current is None or not same_view(current, view):
+                    continue
+
+                # rebaseCurrentView only operates on the active tab. It replaces
+                # that tab's BinaryView and updates every associated UI object.
+                ctx.activateTab(tab)
+                if not ctx.rebaseCurrentView(address):
+                    error.append("Binary Ninja refused the UI rebase.")
+                    return
+
+                new_tab = ctx.getTabForSessionId(session_id)
+                new_frame = ctx.getViewFrameForTab(new_tab) if new_tab else None
+                replacement = (
+                    new_frame.getCurrentBinaryView() if new_frame is not None else None
+                )
+                if replacement is None:
+                    error.append(
+                        "Binary Ninja reported success but no replacement "
+                        "view appeared."
+                    )
+                else:
+                    result.append(replacement)
+                return
+            error.append("The selected BinaryView is not attached to an open UI tab.")
+        except Exception as e:
+            error.append(f"{type(e).__name__}: {e}")
+
+    execute_on_main_thread_and_wait(rebase)
+    if error:
+        raise RuntimeError(error[0])
+    if not result:
+        raise RuntimeError("The UI rebase did not return a replacement BinaryView.")
+    return result[0]

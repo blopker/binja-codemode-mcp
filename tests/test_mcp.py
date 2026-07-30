@@ -29,6 +29,7 @@ class FakeBackend:
         self.guide_topics: list[str | None] = []
         self.defined: list[str] = []
         self.removed: list[str] = []
+        self.rebases: list[tuple[Any, int, int | None, bool]] = []
 
     def execute(
         self,
@@ -57,6 +58,16 @@ class FakeBackend:
     def remove_lib_function(self, name: str) -> str:
         self.removed.append(name)
         return "removed"
+
+    def rebase_view(
+        self,
+        target: Any,
+        new_base: int,
+        entry_point: int | None = None,
+        allow_non_relocatable: bool = False,
+    ) -> str:
+        self.rebases.append((target, new_base, entry_point, allow_non_relocatable))
+        return "rebased"
 
     def guide(self, topic: str | None) -> str:
         self.guide_topics.append(topic)
@@ -145,12 +156,50 @@ class TestTools:
             "define_lib_function",
             "list_lib_functions",
             "remove_lib_function",
+            "rebase_view",
             "binja_guide",
         ]
 
     def test_tool_descriptions_fit_the_truncation_limit(self, handler):
         for tool in call(handler, "tools/list")["result"]["tools"]:
             assert len(tool["description"].encode()) < 2048, tool["name"]
+
+    def test_rebase_accepts_hex_addresses(self, handler, backend):
+        result = call(
+            handler,
+            "tools/call",
+            name="rebase_view",
+            arguments={
+                "target": "binary-2",
+                "new_base": "0x08004000",
+                "entry_point": "0x080040d0",
+                "allow_non_relocatable": True,
+            },
+        )["result"]
+        assert backend.rebases == [("binary-2", 0x08004000, 0x080040D0, True)]
+        assert result["isError"] is False
+
+    @pytest.mark.parametrize(
+        "arguments",
+        [
+            {},
+            {"new_base": -1},
+            {"new_base": True},
+            {"new_base": "08004000"},
+            {"new_base": "0xnope"},
+            {"new_base": 0, "entry_point": []},
+            {"new_base": 0, "allow_non_relocatable": 1},
+        ],
+    )
+    def test_rebase_rejects_invalid_addresses(self, handler, backend, arguments):
+        result = call(
+            handler,
+            "tools/call",
+            name="rebase_view",
+            arguments=arguments,
+        )["result"]
+        assert result["isError"] is True
+        assert backend.rebases == []
 
     def test_execute_passes_code_through_and_returns_output(self, handler, backend):
         result = call(

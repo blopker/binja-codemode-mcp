@@ -360,6 +360,10 @@ class TestCheckpointCompilation:
         exec(compiled, scope, scope)
         assert scope["documented"].__doc__ == "Kept."
 
+    def test_direct_rebase_is_rejected(self):
+        with pytest.raises(ValueError, match="rebase_view"):
+            compile_script("bv.rebase(0x400000)", f"{SCRIPT_PREFIX}rebase>")
+
 
 class TestBatchInvariants:
     """Survivors from the mutation review: true of the code, pinned by nothing."""

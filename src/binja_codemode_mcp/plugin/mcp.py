@@ -61,6 +61,13 @@ List every reusable function with its signature, docstring, and source."""
 REMOVE_LIB_DESCRIPTION = """\
 Remove one reusable function by name."""
 
+REBASE_DESCRIPTION = """\
+Rebase an open BinaryView through Binary Ninja's UI and verify the replacement.
+Requires a saved BNDB with no unsaved changes and creates a timestamped sibling
+backup without overwriting. Optionally add an analysis entry point. It may take as
+long as a full analysis. Non-relocatable images require explicit opt-in; prefer
+`bv.memory_map` for offset-aware raw-image layouts."""
+
 
 class Backend(Protocol):
     """What the protocol layer needs from the plugin."""
@@ -77,6 +84,13 @@ class Backend(Protocol):
     def define_lib_function(self, source: str) -> str: ...
     def list_lib_functions(self) -> str: ...
     def remove_lib_function(self, name: str) -> str: ...
+    def rebase_view(
+        self,
+        target: Any,
+        new_base: int,
+        entry_point: int | None = None,
+        allow_non_relocatable: bool = False,
+    ) -> str: ...
     def guide(self, topic: str | None) -> str: ...
     def status(self) -> dict[str, Any]: ...
 
@@ -266,6 +280,46 @@ class MCPHandler:
                 },
             },
             {
+                "name": "rebase_view",
+                "description": REBASE_DESCRIPTION,
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "target": {
+                            "type": "string",
+                            "description": (
+                                "Binary ID, name, or path. Optional when only "
+                                "one binary is open."
+                            ),
+                        },
+                        "new_base": {
+                            "oneOf": [
+                                {"type": "integer", "minimum": 0},
+                                {"type": "string", "pattern": "^0[xX][0-9a-fA-F]+$"},
+                            ],
+                            "description": "New virtual base; integer or hex string.",
+                        },
+                        "entry_point": {
+                            "oneOf": [
+                                {"type": "integer", "minimum": 0},
+                                {"type": "string", "pattern": "^0[xX][0-9a-fA-F]+$"},
+                            ],
+                            "description": (
+                                "Optional analysis entry point after rebase."
+                            ),
+                        },
+                        "allow_non_relocatable": {
+                            "type": "boolean",
+                            "description": (
+                                "Acknowledge that embedded absolute values may "
+                                "not be adjusted."
+                            ),
+                        },
+                    },
+                    "required": ["new_base"],
+                },
+            },
+            {
                 "name": "binja_guide",
                 "description": GUIDE_DESCRIPTION,
                 "inputSchema": {
@@ -356,6 +410,29 @@ class MCPHandler:
             text = self.backend.guide(topic)
             return _tool_text(text, MAX_RESULT_BYTES, is_error=False)
 
+        if name == "rebase_view":
+            target = args.get("target")
+            if target is not None and not isinstance(target, str):
+                return _tool_error("`target` must be the name of an open binary.")
+            try:
+                new_base = _address(args.get("new_base"), "new_base", required=True)
+                entry_point = _address(
+                    args.get("entry_point"), "entry_point", required=False
+                )
+                allow_non_relocatable = args.get("allow_non_relocatable", False)
+                if not isinstance(allow_non_relocatable, bool):
+                    raise ValueError("`allow_non_relocatable` must be a boolean.")
+                assert new_base is not None
+                text = self.backend.rebase_view(
+                    target,
+                    new_base,
+                    entry_point,
+                    allow_non_relocatable,
+                )
+            except (RuntimeError, ValueError) as e:
+                return _tool_error(str(e))
+            return _tool_text(text, MAX_RESULT_BYTES, is_error=False)
+
         if name == "define_lib_function":
             source = args.get("source")
             if not isinstance(source, str) or not source.strip():
@@ -422,6 +499,24 @@ _HEAD_NOTE = (
 _TAIL_NOTE = "... (truncated; earlier lines were dropped)\n"
 _ERROR_PREFIX = "\nError: "
 _ROLLBACK_NOTE = "\n(Rolled back: any changes this script made are gone.)"
+
+
+def _address(value: Any, name: str, *, required: bool) -> int | None:
+    if value is None:
+        if required:
+            raise ValueError(f"`{name}` is required.")
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        raise ValueError(f"`{name}` must be a non-negative integer or hex string.")
+    try:
+        parsed = int(value, 0) if isinstance(value, str) else value
+    except ValueError:
+        raise ValueError(
+            f"`{name}` must be a non-negative integer or hex string."
+        ) from None
+    if parsed < 0 or parsed > 0xFFFFFFFFFFFFFFFF:
+        raise ValueError(f"`{name}` must fit in an unsigned 64-bit address.")
+    return parsed
 
 
 def _size(text: str) -> int:

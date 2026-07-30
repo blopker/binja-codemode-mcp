@@ -72,8 +72,14 @@ Then ask for work directly:
 ## Tool surface
 
 - `execute` runs Python against one open binary.
+- `rebase_view` backs up and relocates a clean saved database through Binary Ninja's
+  UI.
 - `binja_guide` returns live session details and concise guidance for safe queries and
   edits.
+
+Rebase backups are siblings named
+`<database-stem>.pre-rebase-YYYYMMDDTHHMMSS±HHMM.bndb`; a collision is an error.
+Images Binary Ninja marks non-relocatable require `allow_non_relocatable=true`.
 
 `execute` provides:
 

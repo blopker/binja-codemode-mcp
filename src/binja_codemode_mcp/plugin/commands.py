@@ -12,7 +12,7 @@ from .backend import PluginBackend, render_status_report
 from .logging import LOG_PREFIX, configure_binary_ninja_logging
 from .mcp import MCPHandler
 from .server import MCPHTTPServer
-from .uicontext import list_tabs
+from .uicontext import list_tabs, rebase_current_view
 from .widget import update_status
 
 configure_binary_ninja_logging(
@@ -69,6 +69,7 @@ class BinjaCodeModeMCP:
                 config,
                 tabs_provider=list_tabs,
                 bn_module=binaryninja,
+                rebase_provider=rebase_current_view,
             )
             server = MCPHTTPServer(
                 MCPHandler(backend),

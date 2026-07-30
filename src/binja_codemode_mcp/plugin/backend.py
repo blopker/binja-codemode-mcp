@@ -29,6 +29,13 @@ from .executor import (
 )
 from .guide import render
 from .logging import LOG_PREFIX
+from .rebase import (
+    capture_rebase_state,
+    format_rebase_result,
+    rebase_backup_path,
+    validate_rebase_request,
+    verify_rebase,
+)
 from .session import BinarySession, BinaryTab, same_view
 
 # Supplied fresh on every call, so a saved function must never carry the
@@ -487,6 +494,7 @@ class PluginBackend:
         tabs_provider: Callable[[], list[BinaryTab]],
         bn_module: Any = None,
         watcher_factory: Callable[[Any], Any] | None = None,
+        rebase_provider: Callable[[Any, int], Any] | None = None,
     ) -> None:
         self.config = config
         self.session = BinarySession(tabs_provider)
@@ -497,6 +505,7 @@ class PluginBackend:
             queue_wait=config.queue_wait_s,
         )
         self._bn = bn_module
+        self._rebase_provider = rebase_provider
         self._watcher_factory = (
             watcher_factory
             if watcher_factory is not None
@@ -515,6 +524,79 @@ class PluginBackend:
         result = self.helpers.lib._remove(name)
         logger.info(result)
         return result
+
+    def rebase_view(
+        self,
+        target: Any,
+        new_base: int,
+        entry_point: int | None = None,
+        allow_non_relocatable: bool = False,
+    ) -> str:
+        """Run Binary Ninja's UI-aware rebase and verify the replacement view."""
+        try:
+            tab = self.session.resolve(target)
+        except LookupError as e:
+            logger.warning("refused — %s", e)
+            raise ValueError(str(e)) from None
+        if self._rebase_provider is None:
+            raise RuntimeError(
+                "UI rebasing is unavailable in this Binary Ninja session."
+            )
+
+        with self.executor.exclusive_operation(tab.name):
+            before = capture_rebase_state(tab.bv)
+            validate_rebase_request(
+                before,
+                new_base,
+                entry_point=entry_point,
+                allow_non_relocatable=allow_non_relocatable,
+            )
+            if not before.relocatable:
+                logger.warning(
+                    "%s is non-relocatable with %d relocation ranges; "
+                    "embedded absolute values will not be adjusted",
+                    tab.name,
+                    before.relocation_count,
+                )
+            backup_path = rebase_backup_path(str(tab.bv.file.filename))
+            logger.info("backing up %s to %s", tab.name, backup_path)
+            if not tab.bv.create_database(str(backup_path)):
+                raise RuntimeError(
+                    f"Binary Ninja failed to create pre-rebase backup {backup_path}."
+                )
+            logger.info("rebasing %s to %#x", tab.name, new_base)
+            replacement = self._rebase_provider(tab.bv, new_base)
+
+            if entry_point is not None:
+                replacement.add_entry_point(entry_point)
+                replacement.update_analysis()
+
+            after = capture_rebase_state(replacement)
+            problems = verify_rebase(
+                before,
+                after,
+                new_base,
+                requested_entry_point=entry_point,
+            )
+            if problems:
+                detail = "\n- ".join(problems)
+                logger.error("rebase verification failed — %s", detail)
+                raise RuntimeError(
+                    "Rebase verification failed:\n- "
+                    f"{detail}\nThe replacement view remains open and may already "
+                    f"be saved; verification failure does not roll back a UI "
+                    f"rebase. Recover from {backup_path}."
+                )
+
+            result = format_rebase_result(
+                tab.name,
+                before,
+                after,
+                requested_entry_point=entry_point,
+                backup_path=backup_path,
+            )
+            logger.info("rebase verified: %#x -> %#x", before.start, after.start)
+            return result
 
     def execute(
         self,
