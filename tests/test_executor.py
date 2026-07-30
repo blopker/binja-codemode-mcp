@@ -12,6 +12,7 @@ from binja_codemode_mcp.plugin.executor import (
     Batch,
     CodeExecutor,
     ExecutionResult,
+    _Budget,
     compile_script,
 )
 
@@ -489,11 +490,28 @@ class TestOutput:
         assert len(result.output) < 500
         assert "truncated" in result.output
 
+    def test_one_huge_write_retains_only_the_cap(self):
+        """The old collector appended the complete string before checking its
+        size, so a nominal 32 KB cap could retain and re-encode 500 MB."""
+        budget = _Budget(100)
+        budget.write("x" * 1_000_000)
+        assert sum(len(chunk.encode()) for chunk in budget._chunks) == 100
+        assert budget._size == 100
+        assert "truncated" in budget.value()
+
     def test_the_cap_counts_bytes_not_characters(self, bv):
         """A binary full of CJK strings would otherwise return ~4x the cap."""
         executor = CodeExecutor(max_output_bytes=400)
         result = executor.execute("print('\u6f22' * 1000)", target=bv)
         assert len(result.output.encode()) < 1200
+
+    def test_clipping_does_not_split_a_multibyte_character(self):
+        budget = _Budget(5)
+        budget.write("\u6f22\u6f22")
+        content, _, notice = budget.value().partition("\n")
+        assert content == "\u6f22"
+        assert len(content.encode()) <= 5
+        assert "truncated" in notice
 
     def test_a_runaway_printer_stops_accumulating(self, bv):
         """The buffer must be bounded at write time, not just at read time, or

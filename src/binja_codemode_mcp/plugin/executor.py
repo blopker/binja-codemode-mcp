@@ -179,26 +179,35 @@ class _Budget:
         """Deliberately lock-free.
 
         Exactly one script runs at a time, so there is one writer and one
-        reader. `list.append` and a slice are each a single C-level operation
-        under the GIL, which is all the safety this needs — and a lock here
-        would add overhead to every print. A racy `_size` costs at most a chunk
-        either side of the cap.
+        reader. The reader may see a slightly shorter prefix while the writer
+        finishes, which is harmless, and a lock here would tax every print.
         """
         if self._truncated:
             return
-        self._chunks.append(text)
-        self._size += len(text.encode("utf-8", "replace"))
-        if self._size > self.max_bytes:
-            self._truncated = True
+        remaining = max(0, self.max_bytes - self._size)
+
+        # UTF-8 uses at least one byte per character. Looking at at most
+        # remaining + 1 characters is therefore enough to know whether the
+        # whole string fits, without encoding or retaining a huge print.
+        encoded = text[: remaining + 1].encode("utf-8", "replace")
+        if len(encoded) <= remaining:
+            self._chunks.append(text)
+            self._size += len(encoded)
+            return
+
+        # Decode after the byte slice so a multibyte character crossing the
+        # boundary is omitted rather than returning invalid UTF-8.
+        clipped = encoded[:remaining].decode("utf-8", "ignore")
+        self._chunks.append(clipped)
+        self._size += len(clipped.encode("utf-8"))
+        self._truncated = True
 
     def value(self) -> str:
         out = "".join(self._chunks[:])  # snapshot first; the writer may still run
         truncated = self._truncated
         if not truncated:
             return out
-        # Trim on the encoded form so the advertised cap really is in bytes.
-        clipped = out.encode("utf-8", "replace")[: self.max_bytes]
-        return clipped.decode("utf-8", "ignore") + (
+        return out + (
             f"\n... (truncated at {self.max_bytes} bytes; "
             "filter or paginate before printing)"
         )
@@ -411,7 +420,14 @@ class CodeExecutor:
                 model can parse it."""
                 sep = kwargs.get("sep", " ")
                 end = kwargs.get("end", "\n")
-                budget.write(sep.join(str(a) for a in args) + end)
+                # Stream pieces into the bounded collector. Joining first
+                # briefly duplicated one enormous argument before it could be
+                # clipped.
+                for index, arg in enumerate(args):
+                    if index:
+                        budget.write(sep)
+                    budget.write(str(arg))
+                budget.write(end)
 
             def check_timeout() -> None:
                 if outcome.abandoned:
