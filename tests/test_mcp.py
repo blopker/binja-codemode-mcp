@@ -23,16 +23,22 @@ class FakeBackend:
         self.executed: list[str] = []
         self.targets: list[Any] = []
         self.descriptions: list[Any] = []
+        self.read_only: list[bool] = []
         self.guide_topics: list[str | None] = []
         self.defined: list[str] = []
         self.removed: list[str] = []
 
     def execute(
-        self, code: str, target: Any = None, description: Any = None
+        self,
+        code: str,
+        target: Any = None,
+        description: Any = None,
+        read_only: bool = False,
     ) -> ExecutionResult:
         self.executed.append(code)
         self.targets.append(target)
         self.descriptions.append(description)
+        self.read_only.append(read_only)
         return self.result
 
     def define_lib_function(self, source: str) -> str:
@@ -147,6 +153,25 @@ class TestTools:
         assert backend.executed == ["print(1)"]
         assert result["content"][0]["text"].startswith("ok\n")
         assert result["isError"] is False
+
+    def test_execute_passes_read_only_mode(self, handler, backend):
+        call(
+            handler,
+            "tools/call",
+            name="execute",
+            arguments={"code": "print(1)", "read_only": True},
+        )
+        assert backend.read_only == [True]
+
+    def test_execute_rejects_non_boolean_read_only(self, handler, backend):
+        result = call(
+            handler,
+            "tools/call",
+            name="execute",
+            arguments={"code": "pass", "read_only": 1},
+        )["result"]
+        assert result["isError"] is True
+        assert backend.executed == []
 
     def test_a_timing_footer_follows_the_output(self, handler):
         """Sizing a batch against the timeout is guesswork without a
@@ -396,7 +421,10 @@ class TestErrors:
 
     def test_backend_exception_becomes_an_internal_error(self, handler):
         def boom(
-            code: str, target: Any = None, description: Any = None
+            code: str,
+            target: Any = None,
+            description: Any = None,
+            read_only: bool = False,
         ) -> ExecutionResult:
             raise RuntimeError("backend died")
 
@@ -461,6 +489,7 @@ class TestResponseBudget:
         text = _text(handler, success=True, output="FIRST\n" + "x" * 200_000 + "\nLAST")
         assert text.startswith("FIRST")
         assert "LAST" not in text
+        assert "narrower script" in text
 
     def test_the_timing_footer_survives_truncation(self, handler):
         text = _text(
@@ -517,7 +546,12 @@ class TestResponseBudget:
         assert len(result["content"][0]["text"].encode()) <= MAX_RESULT_BYTES
 
     def test_an_internal_error_message_is_bounded(self, handler):
-        def boom(code: str, target: Any = None, description: Any = None):
+        def boom(
+            code: str,
+            target: Any = None,
+            description: Any = None,
+            read_only: bool = False,
+        ):
             raise RuntimeError("x" * 200_000)
 
         handler.backend.execute = boom  # type: ignore[method-assign]

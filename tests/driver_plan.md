@@ -97,6 +97,11 @@ bv.get_function_at(bv.entry_point).name = "driver_target_here"
 Expect `ls-b`, and verify in a second call (`target="ls-a"`) that `ls-a`'s entry function
 is untouched. A rename landing in `ls-a` while the tool reports success is critical.
 
+**C2a — stable IDs and query mode.** Call `h.binaries()`, then use one returned
+`binary-N` ID as `target` and another with `h.read_only_view()`. Confirm both resolve.
+With `read_only=true`, rename `bv`, request HLIL, and return normally. Expect success
+and confirm in a later call that the rename did not persist.
+
 **C3 — the source is readable and not writable.** With `target="ls-a"`:
 
 ```python
@@ -118,10 +123,11 @@ reason both views are live in one call rather than one per call; if it fails, sa
 
 ## D. Limits and failure modes
 
-**D1 — output is capped, and the cap is usable.** `print("x" * 500000)`. Expect truncated
-output with a note. Then the part that matters: did it arrive **inline**, or did the client
-spill it to a file? The cap dropped from 100 KB to 32 KB because 100 KB was being spilled
-and never read. If 32 KB still spills, say so.
+**D1 — output is capped, and the cap is usable.** `print("x" * 500000)`. Expect
+truncated output with a note suggesting a narrower script or smaller slice. Then the
+part that matters: did it arrive **inline**, or did the client spill it to a file? The
+cap dropped from 100 KB to 32 KB because 100 KB was being spilled and never read. If
+32 KB still spills, say so.
 
 **D2 — the timeout discards its work, and overlap is handled.** First check the ordinary
 collision: two quick calls issued together should **both succeed**, because a second call

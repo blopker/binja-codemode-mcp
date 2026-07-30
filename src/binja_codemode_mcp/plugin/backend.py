@@ -358,7 +358,7 @@ class Helpers:
         self._target = target
 
     def binaries(self) -> list[dict[str, Any]]:
-        """Open binaries, as dicts with index, name and path."""
+        """Open binaries, as dicts with stable id, index, name and path."""
         return self._session.describe()
 
     def read_only_view(self, key: str) -> Any:
@@ -516,9 +516,13 @@ class PluginBackend:
         return result
 
     def execute(
-        self, code: str, target: Any = None, description: str | None = None
+        self,
+        code: str,
+        target: Any = None,
+        description: str | None = None,
+        read_only: bool = False,
     ) -> ExecutionResult:
-        result = self._execute(code, target, description)
+        result = self._execute(code, target, description, read_only)
         # Every result carries the library, including the failures: a script
         # that saved a function and then raised keeps the definition, and the
         # footer is the only place either side can see that. Never at the cost
@@ -531,7 +535,11 @@ class PluginBackend:
         return result
 
     def _execute(
-        self, code: str, target: Any, description: str | None = None
+        self,
+        code: str,
+        target: Any,
+        description: str | None = None,
+        read_only: bool = False,
     ) -> ExecutionResult:
         try:
             tab = self.session.resolve(target)
@@ -544,7 +552,8 @@ class PluginBackend:
         # only afterwards — a script that never returns would otherwise leave
         # no trace at all.
         said = f" — {description}" if description else ""
-        self._log(f"Code Mode MCP: running on {tab.name}{said}")
+        mode = "querying" if read_only else "running"
+        self._log(f"Code Mode MCP: {mode} on {tab.name}{said}")
 
         def on_call(scope: dict[str, Any], batch: Batch) -> None:
             self.helpers.bind_call(scope, batch, tab)
@@ -560,11 +569,12 @@ class PluginBackend:
             helpers=self.helpers,
             on_call=on_call,
             watcher_factory=self._watcher_factory,
+            read_only=read_only,
         )
         if result.timed_out:
             verdict = "timed out"
         elif result.success:
-            verdict = "ok"
+            verdict = "ok, rolled back" if read_only else "ok"
         else:
             verdict = "failed" + (", rolled back" if result.reverted else "")
         self._log(f"Code Mode MCP: {verdict} in {result.elapsed_s:.1f}s")
@@ -595,7 +605,10 @@ class PluginBackend:
 
         return {
             "binja_version": self._binja_version(),
-            "binaries": [_describe_binary(t.bv, t.name, t.path) for t in tabs],
+            "binaries": [
+                _describe_binary(t.bv, t.name, t.path, self.session.identifier(t))
+                for t in tabs
+            ],
             "endpoint": self.config.endpoint,
         }
 
@@ -639,12 +652,14 @@ def render_status_report(
     if not binaries:
         lines.append("No binaries are open.")
     else:
-        lines.append("Open binaries (name is what a call targets):")
-        lines += [f"  {b['name']}" for b in binaries]
+        lines.append("Open binaries:")
+        lines += [f"  {b.get('id') or b['name']}: {b['name']}" for b in binaries]
     return "\n".join(lines)
 
 
-def _describe_binary(bv: Any, name: str, path: str = "") -> dict[str, Any]:
+def _describe_binary(
+    bv: Any, name: str, path: str = "", identifier: str | None = None
+) -> dict[str, Any]:
     """Facts the model would otherwise waste a round trip discovering."""
 
     def safe(fn: Callable[[], Any], default: Any = None) -> Any:
@@ -655,6 +670,7 @@ def _describe_binary(bv: Any, name: str, path: str = "") -> dict[str, Any]:
 
     entry = safe(lambda: bv.entry_point)
     return {
+        "id": identifier,
         "name": name,
         "path": path or safe(lambda: bv.file.filename, ""),
         "view_type": safe(lambda: bv.view_type, "?"),

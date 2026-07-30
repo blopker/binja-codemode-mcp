@@ -29,20 +29,21 @@ _MISSING = object()
 INSTRUCTIONS = """\
 Run Python against the real Binary Ninja API with `execute`. Globals are `bv` (the
 `target` BinaryView), `bn` (binaryninja), and `h` (helpers). Only `bv` is writable;
-omit `target` only when one binary is open.
+set `read_only` for queries. Omit `target` only when one binary is open.
 
 Read `binja_guide` before non-trivial work. Change only what evidence supports;
 record uncertainty in comments. Reusable functions are managed with
 `define_lib_function`, `list_lib_functions`, and `remove_lib_function`."""
 
 EXECUTE_DESCRIPTION = """\
-Run Python with `bv` (the writable `target` BinaryView), `bn` (binaryninja), and
+Run Python with `bv` (the selected `target` BinaryView), `bn` (binaryninja), and
 `h` (`binaries()`, `read_only_view(name)`, read-only `lib`). Builtins and imports work.
 
-An exception rolls back the call. The limit is 30 seconds. Return data with
-`print()` (32 KB max; errors keep 4 KB); filter before decompiling and print
-addresses as hex. Calls are stateless except functions managed by the lib tools and
-called as `h.lib.name()`. Read `binja_guide` before non-trivial work."""
+An exception rolls back the call; `read_only=true` always rolls it back. The limit
+is 30 seconds. Return data with `print()` (32 KB max; errors keep 4 KB); filter
+before decompiling and print addresses as hex. Calls are stateless except functions
+managed by the lib tools and called as `h.lib.name()`. Read `binja_guide` before
+non-trivial work."""
 
 GUIDE_DESCRIPTION = """\
 Return live session details and concise guidance for safe queries and edits."""
@@ -63,7 +64,11 @@ class Backend(Protocol):
     """What the protocol layer needs from the plugin."""
 
     def execute(
-        self, code: str, target: Any = None, description: Any = None
+        self,
+        code: str,
+        target: Any = None,
+        description: Any = None,
+        read_only: bool = False,
     ) -> Any: ...
     def define_lib_function(self, source: str) -> str: ...
     def list_lib_functions(self) -> str: ...
@@ -193,8 +198,14 @@ class MCPHandler:
                         "target": {
                             "type": "string",
                             "description": (
-                                "Writable binary name. Optional when only one "
-                                "binary is open."
+                                "Binary ID, name, or path. Optional when only "
+                                "one binary is open."
+                            ),
+                        },
+                        "read_only": {
+                            "type": "boolean",
+                            "description": (
+                                "Always roll back every view; use for queries."
                             ),
                         },
                         "description": {
@@ -272,7 +283,10 @@ class MCPHandler:
             note = args.get("description")
             if note is not None and not isinstance(note, str):
                 return _tool_error("`description` must be a string.")
-            result = self.backend.execute(code, target, note)
+            read_only = args.get("read_only", False)
+            if not isinstance(read_only, bool):
+                return _tool_error("`read_only` must be a boolean.")
+            result = self.backend.execute(code, target, note, read_only)
 
             # Reserve the footer and the error out of the budget first, then
             # give the rest to output. The footer is concatenated after the
@@ -366,7 +380,7 @@ class MCPHandler:
         raise MCPError(-32602, f"Unknown resource: {uri}")
 
 
-_HEAD_NOTE = "\n... (truncated here; the rest was dropped)"
+_HEAD_NOTE = "\n... (truncated here; rerun a narrower script or print a smaller slice)"
 _TAIL_NOTE = "... (truncated; earlier lines were dropped)\n"
 _ERROR_PREFIX = "\nError: "
 _ROLLBACK_NOTE = "\n(Rolled back: any changes this script made are gone.)"

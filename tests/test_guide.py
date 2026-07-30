@@ -13,6 +13,7 @@ from binja_codemode_mcp.plugin.guide import (
 
 def _binary(name: str, functions: int = 1284) -> dict[str, Any]:
     return {
+        "id": f"binary-{len(name)}",
         "name": name,
         "path": f"/bin/{name}",
         "view_type": "Mach-O",
@@ -52,6 +53,7 @@ class TestHeader:
         header = render_header(FULL_STATUS)
         assert '"ls"' in header and '"libfoo"' in header
         assert "42 functions" in header
+        assert "binary-" in header
 
     def test_demands_a_target_only_when_more_than_one_is_open(self):
         assert "`target`" in render_header(FULL_STATUS)
@@ -134,6 +136,13 @@ class TestGuideContent:
         text = guide_text()
         assert "32 KB" in text
         assert "4 KB" in text
+        assert "narrower script" in text
+
+    def test_documents_stable_ids_and_query_mode(self):
+        text = guide_text()
+        assert "stable IDs" in text
+        assert "read_only=true" in text
+        assert "get_disassembly" in text
 
     def test_tells_the_model_to_print_hex(self):
         assert "Print addresses as hex" in guide_text()

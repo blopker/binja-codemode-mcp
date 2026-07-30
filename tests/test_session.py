@@ -43,6 +43,21 @@ class TestResolve:
         tabs = make_tabs(("ls-a", "/tmp/ls-a"), ("ls-b", "/tmp/ls-b"))
         assert BinarySession(lambda: tabs).resolve("ls-b").name == "ls-b"
 
+    def test_resolve_by_stable_id(self):
+        tabs = make_tabs(("ls-a", "/tmp/ls-a"), ("ls-b", "/tmp/ls-b"))
+        session = BinarySession(lambda: tabs)
+        identifier = session.describe()[1]["id"]
+        assert identifier == "binary-2"
+        assert session.resolve(identifier).name == "ls-b"
+
+    def test_ids_survive_tab_reordering(self):
+        tabs = make_tabs(("ls-a", "/tmp/ls-a"), ("ls-b", "/tmp/ls-b"))
+        session = BinarySession(lambda: tabs)
+        before = {d["name"]: d["id"] for d in session.describe()}
+        tabs.reverse()
+        after = {d["name"]: d["id"] for d in session.describe()}
+        assert after == before
+
     def test_resolve_by_path_fragment(self):
         tabs = make_tabs(("firmware", "/builds/v2/firmware.bin"))
         assert BinarySession(lambda: tabs).resolve("v2").name == "firmware"
@@ -114,6 +129,7 @@ class TestDescribe:
         described = BinarySession(lambda: tabs).describe()
         assert [d["name"] for d in described] == ["ls-a", "ls-b"]
         assert described[0]["path"] == "/tmp/ls-a"
+        assert described[0]["id"] == "binary-1"
 
     def test_nothing_open_is_an_empty_list(self):
         assert BinarySession(list).describe() == []
@@ -133,7 +149,7 @@ class TestDisposedView:
         """
 
         def __init__(self, name: str) -> None:
-            self.file = type("F", (), {"filename": f"/bin/{name}"})()
+            self.file = type("F", (), {"filename": f"/bin/{name}", "session_id": 999})()
 
         @property
         def view_type(self):

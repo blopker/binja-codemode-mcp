@@ -17,9 +17,13 @@ from binja_codemode_mcp.plugin.session import BinaryTab
 
 
 class _FileMetadata:
+    _next_session_id = 1
+
     def __init__(self, filename: str, views: dict[str, "FakeBinaryView"]) -> None:
         self.filename = filename
         self.original_filename = filename
+        self.session_id = self._next_session_id
+        type(self)._next_session_id += 1
         # Deliberately never flips: the real FileMetadata.modified does not
         # track script mutations, which a live probe established the hard way.
         self.modified: bool = False

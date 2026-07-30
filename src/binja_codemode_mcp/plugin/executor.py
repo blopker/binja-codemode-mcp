@@ -209,7 +209,7 @@ class _Budget:
             return out
         return out + (
             f"\n... (truncated at {self.max_bytes} bytes; "
-            "filter or paginate before printing)"
+            "rerun a narrower script or print a smaller slice)"
         )
 
 
@@ -235,22 +235,29 @@ class Batch:
     notification coverage.
     """
 
-    def __init__(self, watcher_factory: Callable[[Any], Any] | None = None) -> None:
+    def __init__(
+        self,
+        watcher_factory: Callable[[Any], Any] | None = None,
+        report_read_only_writes: bool = True,
+    ) -> None:
         self._watcher_factory = watcher_factory
+        self._report_read_only_writes = report_read_only_writes
         self._held: list[_Held] = []
         self._lock = threading.Lock()
         self.violations: list[str] = []
 
-    def open_target(self, view: Any, name: str) -> None:
+    def open_target(self, view: Any, name: str, read_only: bool = False) -> None:
         state = view.begin_undo_actions()
         with self._lock:
-            self._held.append(_Held(view=view, state=state, name=name))
+            self._held.append(
+                _Held(view=view, state=state, name=name, read_only=read_only)
+            )
 
     def open_read_only(self, view: Any, name: str) -> None:
         """Open a state that will revert if the script writes through it."""
         written: Callable[[], bool] | None = None
         release: Callable[[], None] | None = None
-        if self._watcher_factory is not None:
+        if self._report_read_only_writes and self._watcher_factory is not None:
             watcher = self._watcher_factory(view)
             if watcher is not None:
                 written, release = watcher
@@ -365,6 +372,7 @@ class CodeExecutor:
         extra: dict[str, Any] | None = None,
         on_call: Callable[[dict[str, Any], Batch], None] | None = None,
         watcher_factory: Callable[[Any], Any] | None = None,
+        read_only: bool = False,
     ) -> ExecutionResult:
         if target is None:
             return ExecutionResult(
@@ -408,7 +416,10 @@ class CodeExecutor:
         started = time.time()
         outcome = _Outcome()
         budget = _Budget(self.max_output_bytes)
-        batch = Batch(watcher_factory)
+        batch = Batch(
+            watcher_factory,
+            report_read_only_writes=not read_only,
+        )
         try:
             publish_source(script_name, code)
             self._started_at = started
@@ -462,7 +473,7 @@ class CodeExecutor:
         def run() -> None:
             try:
                 try:
-                    batch.open_target(target, target_name)
+                    batch.open_target(target, target_name, read_only=read_only)
                 except BaseException as e:
                     outcome.error = (
                         f"Could not open an undo transaction on {target_name}: "
@@ -584,7 +595,11 @@ class CodeExecutor:
                 reverted=outcome.reverted,
             )
         return ExecutionResult(
-            success=True, output=output, elapsed_s=elapsed, timeout_s=self.timeout
+            success=True,
+            output=output,
+            elapsed_s=elapsed,
+            timeout_s=self.timeout,
+            reverted=outcome.reverted,
         )
 
     def running_script(self) -> tuple[str | None, float] | None:

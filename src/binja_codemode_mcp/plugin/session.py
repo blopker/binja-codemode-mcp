@@ -15,6 +15,7 @@ testable without Binary Ninja.
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from threading import Lock
 from typing import Any
 
 RAW_VIEW = "Raw"
@@ -44,6 +45,14 @@ class BinaryTab:
     name: str
     path: str
     bv: Any
+
+
+def _native_id(bv: Any) -> int | None:
+    """Binary Ninja's stable identifier for one open file session."""
+    try:
+        return int(bv.file.session_id)
+    except Exception:
+        return None
 
 
 class BinaryNotFoundError(LookupError):
@@ -93,14 +102,35 @@ class BinarySession:
 
     def __init__(self, tabs_provider: Callable[[], list[BinaryTab]]) -> None:
         self._tabs_provider = tabs_provider
+        self._ids: dict[int, str] = {}
+        self._next_id = 1
+        self._id_lock = Lock()
 
     def tabs(self) -> list[BinaryTab]:
         return self._tabs_provider()
 
+    def identifier(self, tab: BinaryTab) -> str | None:
+        """Short handle stable for this server process and open file session."""
+        native = _native_id(tab.bv)
+        if native is None:
+            return None
+        with self._id_lock:
+            identifier = self._ids.get(native)
+            if identifier is None:
+                identifier = f"binary-{self._next_id}"
+                self._next_id += 1
+                self._ids[native] = identifier
+            return identifier
+
     def describe(self) -> list[dict[str, Any]]:
         """Open binaries, for the guide header and the `h.binaries()` helper."""
         return [
-            {"index": tab.index, "name": tab.name, "path": tab.path}
+            {
+                "id": self.identifier(tab),
+                "index": tab.index,
+                "name": tab.name,
+                "path": tab.path,
+            }
             for tab in self.tabs()
         ]
 
@@ -133,6 +163,10 @@ class BinarySession:
             )
 
         needle = str(key)
+        exact_ids = [t for t in tabs if self.identifier(t) == needle]
+        if exact_ids:
+            return self._analysed(exact_ids[0])
+
         matches = [t for t in tabs if needle in t.name or needle in t.path]
         if len(matches) > 1:
             raise BinaryNotFoundError(
@@ -159,6 +193,9 @@ class BinarySession:
             return tab
         return BinaryTab(index=tab.index, name=tab.name, path=tab.path, bv=view)
 
-    @staticmethod
-    def _names(tabs: list[BinaryTab]) -> str:
-        return ", ".join(f'"{t.name}"' for t in tabs)
+    def _names(self, tabs: list[BinaryTab]) -> str:
+        def label(tab: BinaryTab) -> str:
+            identifier = self.identifier(tab)
+            return f'"{tab.name}" ({identifier})' if identifier else f'"{tab.name}"'
+
+        return ", ".join(label(t) for t in tabs)

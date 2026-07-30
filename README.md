@@ -79,22 +79,26 @@ Then ask for work directly:
 
 | Name | Value |
 |---|---|
-| `bv` | The writable `BinaryView` selected by `target` |
+| `bv` | The `BinaryView` selected by `target` |
 | `bn` | The `binaryninja` module |
 | `h` | `binaries()`, `read_only_view(name)`, and read-only `lib` |
 
 Builtins, imports, and filesystem access work. Return data with `print()`. Output is
-limited to 32 KB, errors retain 4 KB, and calls time out after 30 seconds.
+limited to 32 KB, errors retain 4 KB, and calls time out after 30 seconds. If output
+is truncated, rerun a narrower script or print a smaller slice.
 
 ### Multiple binaries
 
-With one binary open, `target` is optional. With several, every `execute` call must
-name its writable target. Names match any unique part of an open binary's name or path;
-ambiguous matches are rejected.
+`h.binaries()` returns a stable ID for each open file session, such as `binary-42`.
+Use that ID as `target` or pass a unique name or path. With one binary open, `target`
+is optional.
 
-Read another open binary with `h.read_only_view("name")`. It returns a live
+Read another open binary with `h.read_only_view("binary-42")`. It returns a live
 `BinaryView`, so types and annotations can move directly between databases. Its
 transaction always rolls back; a detected write also fails the call.
+
+Set `read_only=true` on `execute` for queries. `target` still selects `bv`, but every
+view rolls back and lazy analysis/cache updates do not count as write violations.
 
 ### Saved functions
 

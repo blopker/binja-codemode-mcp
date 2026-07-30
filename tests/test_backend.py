@@ -29,6 +29,10 @@ class TestExecute:
         result = backend.execute("print([b['name'] for b in h.binaries()])")
         assert result.output.strip() == "['target']"
 
+    def test_helpers_list_stable_binary_ids(self, backend):
+        result = backend.execute("print(h.binaries()[0]['id'])")
+        assert result.output.strip().startswith("binary-")
+
     def test_no_binary_open_is_a_clean_error(self, config):
         backend = PluginBackend(config, tabs_provider=list)
         result = backend.execute("print(1)")
@@ -53,6 +57,28 @@ class TestTargeting:
         assert backend.execute("bv.rename('landed')", "other").success
         assert other.renames == ["landed"]
         assert bv.renames == []
+
+    def test_a_stable_id_selects_the_target(self, config, bv):
+        backend, other = self._two(config, bv)
+        identifier = backend.session.describe()[1]["id"]
+        assert backend.execute("bv.rename('landed')", identifier).success
+        assert other.renames == ["landed"]
+        assert bv.renames == []
+
+    def test_read_only_execution_rolls_back_a_successful_script(self, config, bv):
+        backend, other = self._two(config, bv)
+        result = backend.execute("bv.rename('discarded')", "other", read_only=True)
+        assert result.success
+        assert result.reverted
+        assert other.renames == []
+        assert other.reverted == 1
+
+    def test_read_only_execution_ignores_write_notifications(self, config, bv):
+        backend, other = self._two(config, bv)
+        backend._watcher_factory = _always_written
+        result = backend.execute("bv.rename('discarded')", "other", read_only=True)
+        assert result.success
+        assert other.renames == []
 
     def test_two_binaries_without_a_target_is_refused(self, config, bv):
         backend, other = self._two(config, bv)
@@ -251,6 +277,16 @@ class TestReadOnlyView:
         assert "other" in (result.error or "")
         assert other.reverted == 1
         assert other.renames == []
+
+    def test_query_mode_ignores_secondary_analysis_notifications(self, config, bv):
+        backend, other = self._two(config, bv, watcher=_always_written)
+        result = backend.execute(
+            'src = h.read_only_view("other")\nprint(len(src.functions))',
+            "target",
+            read_only=True,
+        )
+        assert result.success
+        assert other.reverted == 1
 
 
 def _never_written(view):

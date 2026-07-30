@@ -6,7 +6,8 @@
 - Each call is one undo transaction on `target`; an exception rolls it back.
 - Calls time out after 30 seconds. Filter before iterating and split large jobs; use
   the `[1.4s of 30s]` result footer to size the next batch.
-- `print()` returns up to 32 KB; errors keep their last 4 KB. Print addresses as hex.
+- `print()` returns up to 32 KB; errors keep their last 4 KB. If truncated, rerun a
+  narrower script or print a slice. Print addresses as hex.
 - Do not call Qt, `binaryninjaui`, or `PySide6`: scripts run off the GUI thread.
 - Do not use `bv` or `h.read_only_view()` as a context manager; exiting closes the
   user's view. A view opened by `bn.load(path)` is yours and may use `with`.
@@ -15,16 +16,16 @@
 
 ## Environment
 
-`bv` is the real `BinaryView` named by `target`; `bn` is `binaryninja`. `bv` is the
-only writable view. Omit `target` only when one binary is open.
+`bv` is the real `BinaryView` selected by `target` and the only writable view; `bn`
+is `binaryninja`. Omit `target` only when one binary is open. Set `read_only=true`
+for queries: every view rolls back and analysis/cache notifications are ignored.
 
-- `h.binaries()` lists open binaries and target names.
-- `h.read_only_view(name)` opens another tab for reading. Its transaction always
+- `h.binaries()` lists open binaries and stable IDs such as `binary-42`.
+- `target` and `h.read_only_view()` accept an ID, unique name, or path.
+- `h.read_only_view(id)` opens another tab for reading. Its transaction always
   rolls back; a detected write also fails the call after the script finishes.
 - Normal Python, imports, and filesystem access work. Use `bv.read(address, length)`
   for mapped bytes; `bv.file.original_filename` names the original file.
-
-Targets match any part of a name or path; ambiguous matches are rejected.
 
 Never decompile every function. Select a few first:
 
@@ -35,6 +36,13 @@ for f in hits[:10]:
 ```
 
 ## Querying
+
+For one instruction, use `bv.get_disassembly(addr)`. Keep output bounded:
+
+```python
+for addr in addresses[start:start + 50]:
+    print(hex(addr), bv.get_disassembly(addr))
+```
 
 Address lookups are not interchangeable:
 
@@ -198,11 +206,5 @@ Read every edit back. For tables, decode sample records and check width, count, 
 end address, padding, and boundary entries. For functions, print the final name,
 prototype, and focused IL. Verify comments with `bv.get_comment_at(addr)`.
 
-A productive edit batch is:
-
-1. Inspect bytes, existing analysis, references, and consumers.
-2. Remove only conflicting objects.
-3. Define types and verify widths.
-4. Define data variables and function prototypes.
-5. Add comments for constraints or uncertainty the types cannot express.
-6. Read everything back and inspect the resulting IL.
+Inspect first, remove only conflicts, apply types and annotations, then read them
+back and inspect the resulting IL.

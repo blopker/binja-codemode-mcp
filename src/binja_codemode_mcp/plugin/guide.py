@@ -46,13 +46,15 @@ def render_header(status: dict[str, Any]) -> str:
         lines.append("No binary is open in Binary Ninja.")
     for binary in binaries:
         name = binary["name"]
+        identifier = binary.get("id")
         kind = (
             f"{binary.get('view_type', '?')}, {binary.get('arch', '?')}, "
             f"{binary.get('platform', '?')}"
         )
         counted = f"{binary.get('functions', 0):,} functions"
+        label = f'{identifier} "{name}"' if identifier else f'"{name}"'
         lines.append(
-            f'Binary "{name}" ({kind}) — {counted}, '
+            f"Binary {label} ({kind}) — {counted}, "
             f"{binary.get('start')} – {binary.get('end')}, "
             f"analysis {binary.get('analysis', 'unknown')}, "
             f"entry {binary.get('entry', 'none')}"
@@ -64,7 +66,7 @@ def render_header(status: dict[str, Any]) -> str:
         lines.append(f"Binary Ninja {version} — API docs: api.binary.ninja ({docs})")
 
     if len(binaries) > 1:
-        names = ", ".join(f'"{b["name"]}"' for b in binaries)
+        names = ", ".join(str(b.get("id") or b["name"]) for b in binaries)
         lines.append(
             f"More than one binary is open, so every execute call must name its "
             f"`target`: {names}. The target is the only view you can write to; "
