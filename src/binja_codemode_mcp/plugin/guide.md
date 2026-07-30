@@ -177,24 +177,20 @@ arguments.
 
 ## Saved functions
 
-Calls share no variables or imports. Save reusable functions in `h.lib`:
+Calls share no variables or imports. Store reusable code with the
+`define_lib_function` tool, passing one complete definition:
 
 ```python
 def named(view):
     return [(f.start, f.name) for f in view.functions if not f.symbol.auto]
-
-h.lib["named"] = named
-print(h.lib.named(bv)[:10])
 ```
 
-Only functions can be saved. They run with the current call's `bv`, `bn`, `h`, and
-`print`; pass live database values as arguments instead of capturing them. Use
-`print(h.lib)` to list entries and `h.lib_sources()` to export them.
-
-Referenced imports, plain data, and top-level helpers travel with a saved function;
-stateful objects must be constructed inside it or passed as arguments. Names defined
-by a later caller do not. Inspect `h.lib.name.source`, and call saved functions from
-each other through `h.lib.name()`.
+Then call `h.lib.named(bv)` from `execute`. The namespace is read-only there.
+Definitions run with that call's `bv`, `bn`, `h`, and `print`; put imports and helpers
+inside, pass other values as arguments, and use only immutable literal defaults.
+Annotations are not retained. Use `list_lib_functions` to inspect definitions and
+`remove_lib_function` to delete one. Calls to `h.lib.other()` resolve dynamically, so
+removing `other` makes the caller fail normally.
 
 ## Verification
 

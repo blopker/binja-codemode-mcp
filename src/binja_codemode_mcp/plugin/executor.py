@@ -3,6 +3,8 @@
 Pure module: views are duck-typed, so this is testable without Binary Ninja.
 """
 
+import __future__
+
 import ast
 import contextlib
 import itertools
@@ -18,8 +20,8 @@ from .session import _same_view
 
 # Scripts are compiled under a unique pseudo-filename per call, and their text
 # is registered where linecache can find it. That buys two things: tracebacks
-# quote the line that raised instead of just numbering it, and inspect.getsource
-# works on functions the script saved into h.lib.
+# quote the line that raised instead of just numbering it, including inside
+# functions retained by h.lib.
 SCRIPT_PREFIX = "<mcp:"
 TIMEOUT_CHECK_GLOBAL = "__binja_mcp_check_timeout__"
 # How long an interrupted script is given to unwind and revert before the caller
@@ -29,6 +31,7 @@ TIMEOUT_CHECK_GLOBAL = "__binja_mcp_check_timeout__"
 INTERRUPT_GRACE_S = 0.1
 KEEP_SOURCES = 8  # recent scripts whose text stays available
 _call_seq = itertools.count(1)
+_source_lock = threading.Lock()
 
 
 def next_script_name() -> str:
@@ -48,10 +51,11 @@ def publish_source(name: str, code: str) -> None:
     running, or rejected for a syntax error — evict the text of the one that
     did, permanently costing it source lines and h.lib's `.source`.
     """
-    linecache.cache[name] = (len(code), None, code.splitlines(True), name)
-    held = [k for k in linecache.cache if k.startswith(SCRIPT_PREFIX)]
-    for stale in held[:-KEEP_SOURCES]:  # insertion order is age order
-        linecache.cache.pop(stale, None)
+    with _source_lock:
+        linecache.cache[name] = (len(code), None, code.splitlines(True), name)
+        held = [k for k in linecache.cache if k.startswith(SCRIPT_PREFIX)]
+        for stale in held[:-KEEP_SOURCES]:  # insertion order is age order
+            linecache.cache.pop(stale, None)
 
 
 class _Abandoned(BaseException):
@@ -115,7 +119,7 @@ def _starts_with_docstring(body: list[ast.stmt]) -> bool:
     return isinstance(value, ast.Constant) and isinstance(value.value, str)
 
 
-def compile_script(code: str, name: str) -> Any:
+def compile_script(code: str, name: str, *, defer_annotations: bool = False) -> Any:
     """Compile MCP source with safe points in loops and functions.
 
     The check is part of submitted code, so it cannot fire during transaction
@@ -124,7 +128,8 @@ def compile_script(code: str, name: str) -> Any:
     tree = ast.parse(code, name, "exec")
     tree = _GuardCheckpoints().visit(tree)
     ast.fix_missing_locations(tree)
-    return compile(tree, name, "exec")
+    flags = __future__.annotations.compiler_flag if defer_annotations else 0
+    return compile(tree, name, "exec", flags=flags)
 
 
 @dataclass

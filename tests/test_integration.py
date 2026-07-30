@@ -65,7 +65,13 @@ def test_full_session(client, bv):
     client("initialize")
 
     tools = [t["name"] for t in client("tools/list")["result"]["tools"]]
-    assert tools == ["execute", "binja_guide"]
+    assert tools == [
+        "execute",
+        "define_lib_function",
+        "list_lib_functions",
+        "remove_lib_function",
+        "binja_guide",
+    ]
 
     guide = text_of(client("tools/call", name="binja_guide", arguments={}))
     assert "target" in guide
@@ -86,6 +92,28 @@ def test_full_session(client, bv):
     )
     assert write["result"]["isError"] is False
     assert bv.renames == ["parse_header"]
+
+    defined = client(
+        "tools/call",
+        name="define_lib_function",
+        arguments={"source": "def function_count():\n    return len(bv.functions)"},
+    )
+    assert "Defined h.lib.function_count()" in text_of(defined)
+    assert "def function_count():" in text_of(
+        client("tools/call", name="list_lib_functions", arguments={})
+    )
+    called = client(
+        "tools/call",
+        name="execute",
+        arguments={"code": "print(h.lib.function_count())"},
+    )
+    assert text_of(called).startswith("3")
+    removed = client(
+        "tools/call",
+        name="remove_lib_function",
+        arguments={"name": "function_count"},
+    )
+    assert text_of(removed) == "Removed h.lib.function_count."
 
 
 def test_failed_script_reverts_and_reports(client, bv):

@@ -7,68 +7,47 @@ the real thing, and all three degrade to None without it.
 
 import ast
 import contextlib
+import dis
 import inspect
-import keyword
 import linecache
+import threading
 import types
 from collections.abc import Callable
-from dataclasses import dataclass, field
-from typing import Any, get_args
+from dataclasses import dataclass
+from typing import Any
 
 from ..config import Config
 from .executor import (
-    SCRIPT_PREFIX,
     TIMEOUT_CHECK_GLOBAL,
     Batch,
     CodeExecutor,
     ExecutionResult,
+    compile_script,
+    next_script_name,
+    publish_source,
 )
 from .guide import render
 from .session import BinarySession, BinaryTab, _same_view
 
 # Supplied fresh on every call, so a saved function must never carry the
 # defining call's copies of these.
-LIVE_GLOBALS = ("bv", "bn", "h", "print", TIMEOUT_CHECK_GLOBAL)
+LIVE_GLOBALS = ("__name__", "bv", "bn", "h", "print", TIMEOUT_CHECK_GLOBAL)
 
 
-@dataclass
+@dataclass(frozen=True)
 class _Saved:
-    """A saved function taken apart.
-
-    The function object itself is deliberately not kept: `fn.__globals__` is
-    the whole defining script's scope, so holding one would pin that call's
-    BinaryView — and every large intermediate the script left behind — for the
-    life of the session, including after the user closes that binary.
-    """
+    """A self-contained function without its defining globals."""
 
     code: types.CodeType
-    def_name: str
     source: str
-    origin: str  # the defining script's pseudo-filename
-    cached: tuple[Any, ...] | None  # and its linecache entry
+    origin: str
     signature: str
     doc: str | None
-    captured: dict[str, Any]  # top-level names it uses, minus the live globals
     defaults: tuple[Any, ...] | None = None
-    kwdefaults: dict[str, Any] | None = None
-    annotations: dict[str, Any] = field(default_factory=dict)
+    kwdefaults: tuple[tuple[str, Any], ...] = ()
 
 
-def _holds_a_view(value: Any) -> bool:
-    """Whether a value is a BinaryView, without importing Binary Ninja to ask.
-
-    Duck-typed on three attributes that only a view carries together, so this
-    stays true in tests and in the host alike.
-    """
-    try:
-        for name in ("file", "functions", "start"):
-            inspect.getattr_static(value, name)
-    except AttributeError:
-        return False
-    return True
-
-
-_SAFE_CAPTURE_LEAVES = (
+_IMMUTABLE_DEFAULT_LEAVES = (
     type(None),
     bool,
     int,
@@ -76,308 +55,231 @@ _SAFE_CAPTURE_LEAVES = (
     complex,
     str,
     bytes,
-    range,
     type(Ellipsis),
     type(NotImplemented),
 )
 
 
-def _capture_problem(
-    value: Any,
-    path: str,
-    seen: set[int] | None = None,
-    *,
-    allow_helper: bool = False,
-) -> str | None:
-    """Why retaining value in h.lib is unsafe, or None for bounded state.
-
-    Traverse only containers whose contents are well-defined without running
-    user code. Arbitrary objects can hide a BinaryView in attributes or slots,
-    so accepting one would recreate the same stale-view hole under a wrapper.
-    """
-    if _holds_a_view(value):
-        return f"{path} contains a BinaryView"
-    if isinstance(value, _SAFE_CAPTURE_LEAVES):
+def _default_problem(value: Any, path: str) -> str | None:
+    """Why a default is not deeply immutable."""
+    if type(value) in _IMMUTABLE_DEFAULT_LEAVES:
         return None
-    if isinstance(value, types.ModuleType):
-        return None  # imports are rebuilt as globals and are expected captures
-
-    if seen is None:
-        seen = set()
-    identity = id(value)
-    if identity in seen:
-        return None
-    seen.add(identity)
-
-    if isinstance(value, (types.GenericAlias, types.UnionType)) or (
-        type(value).__module__ == "typing"
-    ):
-        for index, item in enumerate(get_args(value)):
-            problem = _capture_problem(item, f"{path} argument {index + 1}", seen)
-            if problem:
-                return problem
-        return None
-
-    if isinstance(value, type):
-        if value.__module__ == "__binja_mcp__":
-            return f"{path} is a stateful script-defined class"
-        return None
-
-    if isinstance(value, types.BuiltinFunctionType):
-        receiver = value.__self__
-        if receiver is None or isinstance(receiver, types.ModuleType):
-            return None
-        return _capture_problem(receiver, f"{path} receiver", seen)
-
-    if isinstance(value, slice):
-        for name in ("start", "stop", "step"):
-            problem = _capture_problem(getattr(value, name), f"{path}.{name}", seen)
-            if problem:
-                return problem
-        return None
-
-    if type(value) in (list, tuple):
+    if type(value) is tuple:
         for index, item in enumerate(value):
-            problem = _capture_problem(item, f"{path}[{index}]", seen)
+            problem = _default_problem(item, f"{path}[{index}]")
             if problem:
                 return problem
         return None
-
-    if type(value) in (set, frozenset):
-        for index, item in enumerate(value):
-            problem = _capture_problem(item, f"{path} item {index}", seen)
-            if problem:
-                return problem
-        return None
-
-    if type(value) is dict:
-        for index, (key, item) in enumerate(value.items()):
-            problem = _capture_problem(key, f"{path} key {index}", seen)
-            if problem:
-                return problem
-            problem = _capture_problem(item, f"{path}[{key!r}]", seen)
-            if problem:
-                return problem
-        return None
-
-    if isinstance(value, types.FunctionType):
-        if not allow_helper:
-            return (
-                f"{path} is a function nested in retained state; "
-                "keep helpers as direct top-level names"
-            )
-        if value.__closure__ is not None:
-            return f"{path} is a helper function with a closure"
-        for index, item in enumerate(value.__defaults__ or ()):
-            problem = _capture_problem(
-                item, f"{path} default argument {index + 1}", seen
-            )
-            if problem:
-                return problem
-        for name, item in (value.__kwdefaults__ or {}).items():
-            problem = _capture_problem(item, f"{path} default for {name}", seen)
-            if problem:
-                return problem
-        for name, item in getattr(value, "__annotations__", {}).items():
-            problem = _capture_problem(item, f"{path} annotation on {name}", seen)
-            if problem:
-                return problem
-        for name, item in vars(value).items():
-            problem = _capture_problem(item, f"{path} attribute {name!r}", seen)
-            if problem:
-                return problem
-        return None
-
     return (
-        f"{path} is an opaque stateful {type(value).__name__}; "
-        "construct it inside the function or pass it as an argument"
+        f"{path} is {type(value).__name__}, not a deeply immutable value; "
+        "pass it when calling the saved function"
     )
 
 
-def _detach_script_helper(value: Any) -> Any:
-    """Drop a helper's defining globals before retaining it."""
-    if not (
-        isinstance(value, types.FunctionType)
-        and value.__code__.co_filename.startswith(SCRIPT_PREFIX)
+def _default_syntax_problem(node: ast.expr, path: str) -> str | None:
+    """Reject default expressions that would run code while defining a helper."""
+    if isinstance(node, ast.Constant) and type(node.value) in _IMMUTABLE_DEFAULT_LEAVES:
+        return None
+    if isinstance(node, ast.Tuple):
+        for index, item in enumerate(node.elts):
+            problem = _default_syntax_problem(item, f"{path}[{index}]")
+            if problem:
+                return problem
+        return None
+    if (
+        isinstance(node, ast.UnaryOp)
+        and isinstance(node.op, (ast.UAdd, ast.USub))
+        and isinstance(node.operand, ast.Constant)
+        and type(node.operand.value) in (int, float, complex)
     ):
-        return value
-    detached = types.FunctionType(
-        value.__code__, {}, value.__name__, value.__defaults__, None
-    )
-    detached.__kwdefaults__ = value.__kwdefaults__
-    detached.__doc__ = value.__doc__
-    detached.__annotations__ = dict(value.__annotations__)
-    detached.__dict__.update(value.__dict__)
-    return detached
+        return None
+    return f"{path} must be an immutable literal"
 
 
-def _referenced_names(code: types.CodeType) -> set[str]:
-    """Every global name the function body could read, nested scopes included.
+def _definition(source: str) -> ast.FunctionDef:
+    try:
+        tree = ast.parse(source, "<lib-function>", "exec")
+    except SyntaxError as e:
+        raise ValueError(f"Syntax error: {e.msg} (line {e.lineno}).") from None
+    if len(tree.body) != 1 or not isinstance(tree.body[0], ast.FunctionDef):
+        raise ValueError("Source must contain exactly one top-level `def`.")
+    fn = tree.body[0]
+    if fn.name.startswith("_"):
+        raise ValueError("Library function names cannot start with an underscore.")
+    if fn.decorator_list:
+        raise ValueError("Library functions cannot have decorators.")
+    for index, default in enumerate(fn.args.defaults):
+        problem = _default_syntax_problem(default, f"default argument {index + 1}")
+        if problem:
+            raise ValueError(problem)
+    for arg, default in zip(fn.args.kwonlyargs, fn.args.kw_defaults, strict=True):
+        if default is None:
+            continue
+        problem = _default_syntax_problem(default, f"the default for {arg.arg}")
+        if problem:
+            raise ValueError(problem)
+    return fn
 
-    Over-inclusive — `co_names` also holds attribute names — which only means
-    the odd extra entry is carried along, never a missing one.
-    """
-    names = set(code.co_names)
+
+def _global_reads(code: types.CodeType) -> set[str]:
+    """Names loaded from function globals, including nested function bodies."""
+    names = {
+        str(instruction.argval)
+        for instruction in dis.get_instructions(code)
+        if instruction.opname == "LOAD_GLOBAL"
+    }
     for const in code.co_consts:
         if isinstance(const, types.CodeType):
-            names |= _referenced_names(const)
+            names |= _global_reads(const)
     return names
 
 
+def _unsupported_globals(fn: types.FunctionType) -> list[str]:
+    """Global reads that a fresh call cannot supply safely."""
+    defining = fn.__globals__
+    builtins_value = defining.get("__builtins__", {})
+    builtin_names = (
+        set(builtins_value)
+        if isinstance(builtins_value, dict)
+        else set(vars(builtins_value))
+    )
+    unsupported = []
+    for name in _global_reads(fn.__code__):
+        if name in LIVE_GLOBALS:
+            continue
+        if name not in defining and name in builtin_names:
+            continue
+        unsupported.append(name)
+    return sorted(unsupported)
+
+
+def _default_values_problem(fn: types.FunctionType) -> str | None:
+    for index, value in enumerate(fn.__defaults__ or ()):
+        problem = _default_problem(value, f"default argument {index + 1}")
+        if problem:
+            return problem
+    for name, value in (fn.__kwdefaults__ or {}).items():
+        problem = _default_problem(value, f"the default for {name}")
+        if problem:
+            return problem
+    return None
+
+
 class _Library:
-    """`h.lib`: functions kept for the rest of the server session.
-
-    A mapping and a namespace at once — `h.lib["x"] = f`, `h.lib.x()`,
-    `del h.lib.x` — which is why every method here is a dunder or private.
-    `__getattr__` fires only when normal lookup fails, so a public method
-    named `keys` or `items` would permanently shadow an entry of that name.
-
-    Entries are functions, never values, so nothing stored can go stale: each
-    is rebuilt against the running call's live globals on the way out.
-    """
-
-    _INTERNAL = ("_scope", "_entries")
+    """Read-only runtime namespace for tool-managed functions."""
 
     def __init__(self, scope: Callable[[], dict[str, Any] | None]) -> None:
-        self._scope = scope
-        self._entries: dict[str, _Saved] = {}
+        object.__setattr__(self, "_scope", scope)
+        object.__setattr__(self, "_entries", {})
+        object.__setattr__(self, "_lock", threading.RLock())
 
-    def __setitem__(self, key: str, fn: Any) -> None:
-        if (
-            not isinstance(key, str)
-            or not key.isidentifier()
-            or key.startswith("_")
-            or keyword.iskeyword(key)
-        ):
-            raise ValueError(
-                f"{key!r} is not usable as a library name: use a plain identifier "
-                "that is not a keyword and does not start with an underscore."
-            )
-        if not isinstance(fn, types.FunctionType):
-            raise TypeError(
-                f"h.lib holds functions, not {type(fn).__name__}. Define one with "
-                "`def` (or a lambda) in this script and assign that."
-            )
-        if fn.__closure__ is not None:
-            raise ValueError(
-                f"{key!r} captured a value from this call, which would freeze it "
-                "inside the saved function and go stale. Define it at the top level "
-                "and take what it needs as a parameter."
-            )
-        origin = fn.__code__.co_filename
-        if not origin.startswith(SCRIPT_PREFIX):
-            raise ValueError(
-                f"{key!r} must be defined in your script. A function from elsewhere "
-                f"({origin}) needs its own module's globals, which rebinding removes."
-            )
-        # Retained values outlive this call. Keep only bounded plain data and
-        # helpers that can be rebound safely to a later call's live globals.
-        unsafe = _unsafe_captures(fn, self._scope())
-        if unsafe:
-            raise ValueError(
-                f"{key!r} cannot be saved because {unsafe}. Retained state can "
-                "go stale or point outside a later call's transaction. Take live "
-                "values as parameters and pass bv or h.read_only_view(name) at "
-                "the call."
-            )
-
+    def _define(self, source: str) -> str:
+        node = _definition(source)
+        origin = next_script_name()
         try:
-            source = inspect.getsource(fn)
-        except OSError:  # its script aged out of the source cache
-            source = f"# source unavailable for {key}"
+            compiled = compile_script(source, origin, defer_annotations=True)
+        except SyntaxError as e:
+            raise ValueError(f"Syntax error: {e.msg} (line {e.lineno}).") from None
+        defining: dict[str, Any] = {"__name__": "__binja_mcp__"}
+        exec(compiled, defining, defining)
+        fn = defining[node.name]
+        fn.__annotations__ = {}
+
+        unsupported = _unsupported_globals(fn)
+        if unsupported:
+            names = ", ".join(repr(name) for name in unsupported)
+            raise ValueError(
+                f"{node.name!r} is not self-contained: it reads {names}. Move "
+                "imports and helpers inside the function, and pass other values "
+                "as arguments."
+            )
+        defaults_problem = _default_values_problem(fn)
+        if defaults_problem:
+            raise ValueError(
+                f"{node.name!r} cannot be saved because {defaults_problem}."
+            )
+
         try:
             signature = str(inspect.signature(fn))
         except (TypeError, ValueError):
             signature = "(...)"
-
-        # Carry the top-level names the body reads — imports, constants — so a
-        # saved function is not stripped of everything its defining script set
-        # up. The live globals are excluded: those are supplied fresh per call.
-        defining = self._scope() or fn.__globals__
-        wanted = _referenced_names(fn.__code__)
-        captured = {
-            name: _detach_script_helper(value)
-            for name, value in defining.items()
-            if name in wanted and name not in LIVE_GLOBALS and name != "__builtins__"
-        }
-
-        self._entries[key] = _Saved(
+        rec = _Saved(
             code=fn.__code__,
-            def_name=fn.__name__,
             source=source,
             origin=origin,
-            cached=linecache.cache.get(origin),
             signature=signature,
             doc=fn.__doc__,
-            captured=captured,
             defaults=fn.__defaults__,
-            kwdefaults=fn.__kwdefaults__,
-            annotations=dict(getattr(fn, "__annotations__", {})),
+            kwdefaults=tuple((fn.__kwdefaults__ or {}).items()),
+        )
+        publish_source(origin, source)
+        with self._lock:
+            replaced = node.name in self._entries
+            self._entries[node.name] = rec
+        verb = "Replaced" if replaced else "Defined"
+        return (
+            f"{verb} h.lib.{node.name}{signature}. "
+            f"Call it from execute as h.lib.{node.name}(...)."
         )
 
+    def _remove(self, name: str) -> str:
+        with self._lock:
+            if name not in self._entries:
+                raise ValueError(
+                    f"No library function {name!r}. Saved: {self._names_locked()}."
+                )
+            del self._entries[name]
+        return f"Removed h.lib.{name}."
+
+    def _listing(self) -> str:
+        with self._lock:
+            entries = tuple(self._entries.items())
+        if not entries:
+            return "No library functions are defined."
+        blocks = []
+        for name, rec in entries:
+            heading = f"h.lib.{name}{rec.signature}"
+            doc = (rec.doc or "").strip().splitlines()
+            if doc:
+                heading += f" — {doc[0]}"
+            blocks.append(f"{heading}\n\n{rec.source.rstrip()}")
+        return "\n\n".join(blocks)
+
+    def _names(self) -> tuple[str, ...]:
+        with self._lock:
+            return tuple(self._entries)
+
+    def _names_locked(self) -> str:
+        return ", ".join(self._entries) or "nothing"
+
     def __getitem__(self, key: str) -> Any:
-        rec = self._entries.get(key)
+        with self._lock:
+            rec = self._entries.get(key)
         if rec is None:
             raise KeyError(key)
-        # Republish the defining script so a traceback from inside this function
-        # still quotes source, however many calls ago it was saved.
-        if rec.cached is not None and rec.origin not in linecache.cache:
-            linecache.cache[rec.origin] = rec.cached
+        if rec.origin not in linecache.cache:
+            publish_source(rec.origin, rec.source)
         return self._rebind(key, rec)
 
     def _rebind(self, key: str, rec: _Saved) -> Any:
         """Rebuild the function against the running call's live globals.
 
-        A function resolves globals from the call that defined it, so without
-        this a saved function sees the first call's `bv` forever and its
-        `print` writes into an output budget that closed long ago. Only the
-        live globals come from the calling script — the rest of what the
-        function sees is what it was defined with, so a name the caller happens
-        to have bound cannot quietly change what a saved function means.
-
-        A fresh dict per retrieval, deliberately: caching one per entry made a
-        redefinition within the same script keep the previous definition's
-        globals, so fixing a saved function and re-testing it in one call
-        silently ran the old one.
+        Saved functions are self-contained, so only the current call's live
+        globals and builtins are present. Nothing from the defining call is
+        retained.
         """
         scope = self._scope() or {}
-        merged = dict(rec.captured)
-        merged.update({k: scope[k] for k in LIVE_GLOBALS if k in scope})
+        merged = {k: scope[k] for k in LIVE_GLOBALS if k in scope}
         if "__builtins__" in scope:
             merged["__builtins__"] = scope["__builtins__"]
 
-        # Rebind captured helper functions onto the same globals. A sibling
-        # defined alongside the saved one carries its own `__globals__` — the
-        # defining call's scope, including that call's `bv` — so calling it
-        # would write to the binary the library was written against rather than
-        # this call's target, outside any transaction and reported as success.
-        # They share `merged`, so helpers that call each other still resolve.
-        for name, value in list(merged.items()):
-            if not isinstance(value, types.FunctionType):
-                continue
-            if value.__code__.co_filename.startswith(SCRIPT_PREFIX):
-                helper = types.FunctionType(
-                    value.__code__, merged, name, value.__defaults__, value.__closure__
-                )
-                helper.__kwdefaults__ = value.__kwdefaults__
-                helper.__doc__ = value.__doc__
-                helper.__annotations__ = dict(value.__annotations__)
-                helper.__dict__.update(value.__dict__)
-                merged[name] = helper
-
         fn = types.FunctionType(rec.code, merged, key, rec.defaults, None)
-        fn.__kwdefaults__ = rec.kwdefaults
+        fn.__kwdefaults__ = dict(rec.kwdefaults) or None
         fn.__doc__ = rec.doc
-        fn.__annotations__ = dict(rec.annotations)
         # Through __dict__ because `source` is not an attribute functions
         # declare; reading it back as `h.lib.name.source` works either way.
         fn.__dict__["source"] = rec.source
         return fn
-
-    def __delitem__(self, key: str) -> None:
-        if key not in self._entries:
-            raise KeyError(f"no saved function {key!r}. Saved: {self._names()}.")
-        del self._entries[key]
 
     def __getattr__(self, key: str) -> Any:
         if key.startswith("_"):
@@ -388,146 +290,47 @@ class _Library:
             # AttributeError, not the KeyError __getitem__ raises: hasattr()
             # swallows the former and propagates the latter.
             raise AttributeError(
-                f"no saved function {key!r}. Saved: {self._names()}. "
-                f'Save one with h.lib["{key}"] = your_function.'
+                f"No library function {key!r}. Saved: "
+                f"{', '.join(self._names()) or 'nothing'}. "
+                "Use the define_lib_function tool to add one."
             ) from None
 
     def __setattr__(self, key: str, value: Any) -> None:
-        """`h.lib.name = fn` is the obvious spelling, so it must be the real one.
-
-        Left to the default, it would write into the instance __dict__ instead:
-        no validation, and the entry permanently shadowed for attribute reads
-        while the subscript form and the footer still saw the saved function.
-        """
-        if key in self._INTERNAL and key not in self.__dict__:
-            object.__setattr__(self, key, value)
-            return
-        if key.startswith("_"):
-            raise AttributeError(f"{key} belongs to h.lib itself and cannot be set.")
-        self[key] = value
+        raise AttributeError("h.lib is read-only in execute. Use define_lib_function.")
 
     def __delattr__(self, key: str) -> None:
-        if key.startswith("_"):
-            # Never object.__delattr__: dropping _entries would break every
-            # later use of the library.
-            raise AttributeError(
-                f"{key} belongs to h.lib itself and cannot be deleted."
-            )
-        try:
-            del self[key]
-        except KeyError as e:
-            raise AttributeError(str(e)) from None
+        raise AttributeError("h.lib is read-only in execute. Use remove_lib_function.")
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        raise TypeError("h.lib is read-only in execute. Use define_lib_function.")
+
+    def __delitem__(self, key: str) -> None:
+        raise TypeError("h.lib is read-only in execute. Use remove_lib_function.")
 
     def __contains__(self, key: object) -> bool:
-        return key in self._entries
+        with self._lock:
+            return key in self._entries
 
     def __iter__(self) -> Any:
-        return iter(self._entries)
+        return iter(self._names())
 
     def __len__(self) -> int:
-        return len(self._entries)
+        with self._lock:
+            return len(self._entries)
 
     def __repr__(self) -> str:
-        if not self._entries:
-            return (
-                'h.lib is empty. Save a function with h.lib["name"] = your_function, '
-                "then call it as h.lib.name()."
-            )
-        lines = [f"h.lib — {len(self._entries)} saved:"]
-        for key, rec in self._entries.items():
+        with self._lock:
+            entries = tuple(self._entries.items())
+        if not entries:
+            return "h.lib is empty. Use define_lib_function to add a function."
+        lines = [f"h.lib — {len(entries)} saved:"]
+        for key, rec in entries:
             line = f"  h.lib.{key}{rec.signature}"
-            if rec.def_name != key:
-                line += f"  [def {rec.def_name}]"
             doc = (rec.doc or "").strip().splitlines()
             if doc:
                 line += f" — {doc[0]}"
             lines.append(line)
         return "\n".join(lines)
-
-    def _names(self) -> str:
-        return ", ".join(self._entries) or "nothing"
-
-    def _sources(self) -> str:
-        """Every definition, with what each one needs to run.
-
-        The bodies alone are not enough to paste into a new session: a saved
-        function carries the top-level imports and constants it referenced, and
-        without them the text raises NameError on the first call. Anything that
-        cannot be written back as source is named in a comment rather than
-        silently omitted.
-        """
-        if not self._entries:
-            return "h.lib is empty."
-        blocks = []
-        for key, rec in self._entries.items():
-            preamble = _render_captured(rec.captured)
-            blocks.append(f'# h.lib["{key}"]\n{preamble}{rec.source.rstrip()}')
-        return "\n\n".join(blocks)
-
-
-def _render_captured(captured: dict[str, Any]) -> str:
-    """Source for the top-level names a saved function carries, where possible."""
-    lines: list[str] = []
-
-    # Imports first: a constant above the import it sits next to is valid Python
-    # and reads as though it were unrelated.
-    def _import_first(item: tuple[str, Any]) -> tuple[bool, str]:
-        name, value = item
-        return (not isinstance(value, types.ModuleType), name)
-
-    ordered = sorted(captured.items(), key=_import_first)
-    for name, value in ordered:
-        if isinstance(value, types.ModuleType):
-            actual = getattr(value, "__name__", name)
-            lines.append(
-                f"import {actual}" if actual == name else f"import {actual} as {name}"
-            )
-            continue
-        if isinstance(value, types.FunctionType):
-            try:
-                lines.append(inspect.getsource(value).rstrip())
-            except OSError:
-                lines.append(f"# {name}() — helper source no longer available")
-            continue
-        try:  # only values that read back as what they are
-            rendered = repr(value)
-            if ast.literal_eval(rendered) == value:
-                lines.append(f"{name} = {rendered}")
-                continue
-        except (ValueError, SyntaxError, TypeError, MemoryError):
-            pass
-        lines.append(f"# {name} = <{type(value).__name__}> — re-supply this by hand")
-    return "\n".join(lines) + "\n\n" if lines else ""
-
-
-def _unsafe_captures(fn: Any, scope: dict[str, Any] | None) -> str | None:
-    """The first value a saved function cannot safely retain."""
-    seen: set[int] = set()
-    for i, value in enumerate(fn.__defaults__ or ()):
-        problem = _capture_problem(value, f"default argument {i + 1}", seen)
-        if problem:
-            return problem
-    for name, value in (fn.__kwdefaults__ or {}).items():
-        problem = _capture_problem(value, f"the default for {name}", seen)
-        if problem:
-            return problem
-    for name, value in getattr(fn, "__annotations__", {}).items():
-        problem = _capture_problem(value, f"the annotation on {name}", seen)
-        if problem:
-            return problem
-    if scope:
-        wanted = _referenced_names(fn.__code__)
-        for name, value in scope.items():
-            if name in wanted and name not in LIVE_GLOBALS:
-                problem = _capture_problem(
-                    value,
-                    f"the top-level name {name!r}",
-                    seen,
-                    allow_helper=True,
-                )
-                if problem:
-                    return problem
-    return None
 
 
 class Helpers:
@@ -543,8 +346,8 @@ class Helpers:
     def __setattr__(self, name: str, value: Any) -> None:
         if name == "lib" and "lib" in self.__dict__:
             raise AttributeError(
-                "h.lib cannot be replaced. Save an entry with "
-                'h.lib["name"] = your_function.'
+                "h.lib cannot be replaced. Use define_lib_function and "
+                "remove_lib_function."
             )
         object.__setattr__(self, name, value)
 
@@ -553,14 +356,6 @@ class Helpers:
         self._scope = scope
         self._batch = batch
         self._target = target
-
-    def lib_sources(self) -> str:
-        """Every saved definition as text, to carry a library to a new session.
-
-        On `h` rather than `h.lib` for the same reason the library's own methods
-        are private: a public name there would shadow an entry.
-        """
-        return self.lib._sources()
 
     def binaries(self) -> list[dict[str, Any]]:
         """Open binaries, as dicts with index, name and path."""
@@ -588,10 +383,7 @@ class Helpers:
         return tab.bv
 
     def __repr__(self) -> str:
-        return (
-            "<binja mcp helpers: h.binaries(), h.read_only_view(name), "
-            "h.lib, h.lib_sources()>"
-        )
+        return "<binja mcp helpers: h.binaries(), h.read_only_view(name), h.lib>"
 
 
 # Mutations a script can make that mean "this view was written to". Deliberately
@@ -710,6 +502,19 @@ class PluginBackend:
             else make_watcher_factory(bn_module)
         )
 
+    def define_lib_function(self, source: str) -> str:
+        result = self.helpers.lib._define(source)
+        self._log(f"Code Mode MCP: {result}")
+        return result
+
+    def list_lib_functions(self) -> str:
+        return self.helpers.lib._listing()
+
+    def remove_lib_function(self, name: str) -> str:
+        result = self.helpers.lib._remove(name)
+        self._log(f"Code Mode MCP: {result}")
+        return result
+
     def execute(
         self, code: str, target: Any = None, description: str | None = None
     ) -> ExecutionResult:
@@ -720,7 +525,7 @@ class PluginBackend:
         # of the result itself — a footer that raised here would turn every
         # later call into an internal error, whether or not it used h.lib.
         try:
-            result.lib = tuple(self.helpers.lib)
+            result.lib = self.helpers.lib._names()
         except Exception:
             result.lib = ()
         return result

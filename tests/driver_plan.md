@@ -171,9 +171,9 @@ edits. A run needing none of the previously surfaced idioms is the signal it has
 New and unproven. The question is not "does it work" — the suite covers that — but **does
 a model reach for it unprompted**.
 
-**G1 — save, reuse, inspect.** Define a function, save it with `h.lib["name"] = fn`, call
-it in a later call, and confirm the footer lists it. Then `print(h.lib)`,
-`h.lib.<name>.source`, `h.lib_sources()`, `del h.lib.<name>`.
+**G1 — save, reuse, inspect.** Store a function with `define_lib_function`, call it from
+`execute` in a later call, and confirm the footer lists it. Inspect it with
+`list_lib_functions`, then remove it with `remove_lib_function`.
 
 **G2 — saved functions follow the call's target.** Save a function returning
 `bv.file.filename`. Call it with `target="ls-a"`, then with `target="ls-b"`: the answers
@@ -181,20 +181,14 @@ must differ, without the function being redefined. Then save one that takes a vi
 parameter and pass `h.read_only_view(...)` to it. Also confirm a saved function's
 `print()` output comes back in the calling script's result.
 
-**G3 — what it carries, and the refusal that matters.** A script that does `import json`
-at the top and saves a function using it must still work several calls later, and so must
-one reading a top-level constant — those are carried deliberately.
+**G3 — self-contained means self-contained.** Define a function with an import and helper
+inside it; it must work several calls later. A function reading an external name must be
+refused at definition time and say how to fix it. `def where(src=bv): ...` must also be
+refused because the default is stateful, while `def top(limit=5)` is accepted. Assignment
+or deletion through `h.lib` inside `execute` must point to the management tools.
 
-Then the refusal worth checking by hand, because it is the shape the closure message
-recommends: `def where(src=bv): ...` saved into `h.lib`. It must be refused, naming the
-default argument — a view held that way would still point at this call's binary when the
-function is later run against another target. Confirm the message says to take the view as
-a parameter, and that an ordinary default (`def top(limit=5)`) is still accepted.
-
-**G4 — the dump is self-sufficient.** Save a function that uses a top-level `import` and a
-constant, then read `h.lib_sources()`. It is advertised as what you paste into a new
-session, so the import and the constant must appear alongside the `def` — a previous run
-found only the bodies, which raise `NameError` on first use.
+**G4 — the listing is self-sufficient.** `list_lib_functions` must return the complete
+definition with its local import and helper.
 
 **G5 — error quality.** Failures now report the *line* that raised, not just its number.
 Confirm on an ordinary failure, then on a raise inside a function saved 15+ calls earlier —

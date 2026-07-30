@@ -24,6 +24,8 @@ class FakeBackend:
         self.targets: list[Any] = []
         self.descriptions: list[Any] = []
         self.guide_topics: list[str | None] = []
+        self.defined: list[str] = []
+        self.removed: list[str] = []
 
     def execute(
         self, code: str, target: Any = None, description: Any = None
@@ -32,6 +34,17 @@ class FakeBackend:
         self.targets.append(target)
         self.descriptions.append(description)
         return self.result
+
+    def define_lib_function(self, source: str) -> str:
+        self.defined.append(source)
+        return "defined"
+
+    def list_lib_functions(self) -> str:
+        return "library listing"
+
+    def remove_lib_function(self, name: str) -> str:
+        self.removed.append(name)
+        return "removed"
 
     def guide(self, topic: str | None) -> str:
         self.guide_topics.append(topic)
@@ -86,9 +99,15 @@ class TestNotifications:
 
 
 class TestTools:
-    def test_lists_execute_and_guide(self, handler):
+    def test_lists_execution_library_and_guide_tools(self, handler):
         names = [t["name"] for t in call(handler, "tools/list")["result"]["tools"]]
-        assert names == ["execute", "binja_guide"]
+        assert names == [
+            "execute",
+            "define_lib_function",
+            "list_lib_functions",
+            "remove_lib_function",
+            "binja_guide",
+        ]
 
     def test_tool_descriptions_fit_the_truncation_limit(self, handler):
         for tool in call(handler, "tools/list")["result"]["tools"]:
@@ -218,6 +237,61 @@ class TestTools:
     def test_guide_forwards_the_topic(self, handler, backend):
         call(handler, "tools/call", name="binja_guide", arguments={"topic": "Types"})
         assert backend.guide_topics == ["Types"]
+
+    def test_define_lib_function_forwards_source(self, handler, backend):
+        result = call(
+            handler,
+            "tools/call",
+            name="define_lib_function",
+            arguments={"source": "def answer():\n    return 42"},
+        )["result"]
+        assert backend.defined == ["def answer():\n    return 42"]
+        assert result["content"][0]["text"] == "defined"
+        assert result["isError"] is False
+
+    def test_define_lib_function_requires_source(self, handler, backend):
+        result = call(handler, "tools/call", name="define_lib_function", arguments={})[
+            "result"
+        ]
+        assert result["isError"] is True
+        assert backend.defined == []
+
+    def test_list_lib_functions_returns_the_listing(self, handler):
+        result = call(handler, "tools/call", name="list_lib_functions", arguments={})[
+            "result"
+        ]
+        assert result["content"][0]["text"] == "library listing"
+
+    def test_remove_lib_function_forwards_name(self, handler, backend):
+        result = call(
+            handler,
+            "tools/call",
+            name="remove_lib_function",
+            arguments={"name": "answer"},
+        )["result"]
+        assert backend.removed == ["answer"]
+        assert result["content"][0]["text"] == "removed"
+
+    def test_remove_lib_function_requires_name(self, handler, backend):
+        result = call(handler, "tools/call", name="remove_lib_function", arguments={})[
+            "result"
+        ]
+        assert result["isError"] is True
+        assert backend.removed == []
+
+    def test_library_validation_errors_are_tool_errors(self, handler):
+        def reject(_source):
+            raise ValueError("not self-contained")
+
+        handler.backend.define_lib_function = reject  # type: ignore[method-assign]
+        result = call(
+            handler,
+            "tools/call",
+            name="define_lib_function",
+            arguments={"source": "def bad(): pass"},
+        )["result"]
+        assert result["isError"] is True
+        assert "not self-contained" in result["content"][0]["text"]
 
     def test_unknown_tool_is_a_tool_error_not_a_crash(self, handler):
         result = call(handler, "tools/call", name="nope", arguments={})["result"]

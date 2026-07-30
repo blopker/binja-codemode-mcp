@@ -29,19 +29,31 @@ Run Python against the real Binary Ninja API with `execute`. Globals are `bv` (t
 omit `target` only when one binary is open.
 
 Read `binja_guide` before non-trivial work. Change only what evidence supports;
-record uncertainty in comments."""
+record uncertainty in comments. Reusable functions are managed with
+`define_lib_function`, `list_lib_functions`, and `remove_lib_function`."""
 
 EXECUTE_DESCRIPTION = """\
 Run Python with `bv` (the writable `target` BinaryView), `bn` (binaryninja), and
-`h` (`binaries()`, `read_only_view(name)`, `lib`). Builtins and imports work.
+`h` (`binaries()`, `read_only_view(name)`, read-only `lib`). Builtins and imports work.
 
 An exception rolls back the call. The limit is 30 seconds. Return data with
 `print()` (32 KB max; errors keep 4 KB); filter before decompiling and print
-addresses as hex. Calls are stateless except functions saved with
-`h.lib["name"] = fn`. Read `binja_guide` before non-trivial work."""
+addresses as hex. Calls are stateless except functions managed by the lib tools and
+called as `h.lib.name()`. Read `binja_guide` before non-trivial work."""
 
 GUIDE_DESCRIPTION = """\
 Return live session details and concise guidance for safe queries and edits."""
+
+DEFINE_LIB_DESCRIPTION = """\
+Define or replace one reusable function. `source` must contain one self-contained,
+undecorated `def`; put imports and helpers inside it. Call it later from `execute`
+as `h.lib.name(...)`."""
+
+LIST_LIB_DESCRIPTION = """\
+List every reusable function with its signature, docstring, and source."""
+
+REMOVE_LIB_DESCRIPTION = """\
+Remove one reusable function by name."""
 
 
 class Backend(Protocol):
@@ -50,6 +62,9 @@ class Backend(Protocol):
     def execute(
         self, code: str, target: Any = None, description: Any = None
     ) -> Any: ...
+    def define_lib_function(self, source: str) -> str: ...
+    def list_lib_functions(self) -> str: ...
+    def remove_lib_function(self, name: str) -> str: ...
     def guide(self, topic: str | None) -> str: ...
     def status(self) -> dict[str, Any]: ...
 
@@ -164,6 +179,39 @@ class MCPHandler:
                 },
             },
             {
+                "name": "define_lib_function",
+                "description": DEFINE_LIB_DESCRIPTION,
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "source": {
+                            "type": "string",
+                            "description": "One complete Python `def` statement.",
+                        }
+                    },
+                    "required": ["source"],
+                },
+            },
+            {
+                "name": "list_lib_functions",
+                "description": LIST_LIB_DESCRIPTION,
+                "inputSchema": {"type": "object", "properties": {}},
+            },
+            {
+                "name": "remove_lib_function",
+                "description": REMOVE_LIB_DESCRIPTION,
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "Function name to remove.",
+                        }
+                    },
+                    "required": ["name"],
+                },
+            },
+            {
                 "name": "binja_guide",
                 "description": GUIDE_DESCRIPTION,
                 "inputSchema": {
@@ -223,6 +271,35 @@ class MCPHandler:
         if name == "binja_guide":
             topic = args.get("topic")
             text = self.backend.guide(topic if isinstance(topic, str) else None)
+            return _tool_text(text, MAX_RESULT_BYTES, is_error=False)
+
+        if name == "define_lib_function":
+            source = args.get("source")
+            if not isinstance(source, str) or not source.strip():
+                return _tool_error(
+                    "`source` is required and must be one complete `def`."
+                )
+            try:
+                text = self.backend.define_lib_function(source)
+            except ValueError as e:
+                return _tool_error(str(e))
+            return _tool_text(text, MAX_RESULT_BYTES, is_error=False)
+
+        if name == "list_lib_functions":
+            return _tool_text(
+                self.backend.list_lib_functions(),
+                MAX_RESULT_BYTES,
+                is_error=False,
+            )
+
+        if name == "remove_lib_function":
+            function_name = args.get("name")
+            if not isinstance(function_name, str) or not function_name:
+                return _tool_error("`name` is required.")
+            try:
+                text = self.backend.remove_lib_function(function_name)
+            except ValueError as e:
+                return _tool_error(str(e))
             return _tool_text(text, MAX_RESULT_BYTES, is_error=False)
 
         return _tool_error(f"Unknown tool: {name}")

@@ -1,5 +1,7 @@
 """Wiring of session, executor, helpers and guide behind one backend."""
 
+from concurrent.futures import ThreadPoolExecutor
+
 import pytest
 
 from binja_codemode_mcp.config import Config
@@ -353,516 +355,201 @@ class TestGuide:
 
 
 class TestLibrary:
-    """`h.lib`: functions saved for the rest of the server session.
+    def test_define_call_list_and_remove(self, backend):
+        message = backend.define_lib_function(
+            'def double(value=2):\n    """Double a value."""\n    return value * 2'
+        )
+        assert "Defined h.lib.double(value=2)" in message
+        assert backend.execute("print(h.lib.double(6))").output.strip() == "12"
 
-    Functions rather than values, so there is never an "is this still true?"
-    question — a saved function re-derives against whatever is live now.
-    """
+        listing = backend.list_lib_functions()
+        assert "h.lib.double(value=2) — Double a value." in listing
+        assert "def double(value=2):" in listing
 
-    def _two_binaries(self, config, bv):
+        assert backend.remove_lib_function("double") == "Removed h.lib.double."
+        result = backend.execute("h.lib.double()")
+        assert not result.success
+        assert "No library function 'double'" in (result.error or "")
+
+    def test_definition_does_not_need_an_open_binary(self, config):
+        backend = PluginBackend(config, tabs_provider=list)
+        assert "Defined" in backend.define_lib_function("def answer():\n    return 42")
+        assert "h.lib.answer()" in backend.list_lib_functions()
+
+    def test_a_saved_function_uses_the_calling_targets_view(self, config, bv):
         other = type(bv)("other")
         tabs = [
             BinaryTab(0, "target", "/bin/target", bv),
             BinaryTab(1, "other", "/bin/other", other),
         ]
-        return PluginBackend(config, tabs_provider=lambda: tabs)
-
-    def test_a_saved_function_prints_into_the_running_script(self, backend):
-        """Its `print` must be this call's, not the closed budget of the call
-        that defined it — where the output would vanish silently."""
-        backend.execute(
-            'def shout():\n    print("from the library")\nh.lib["shout"] = shout'
+        backend = PluginBackend(config, tabs_provider=lambda: tabs)
+        backend.define_lib_function(
+            "def port():\n    bv.rename('by_library')\n    return bv.file.filename"
         )
+
+        result = backend.execute("print(h.lib.port())", "other")
+        assert result.output.strip() == "/bin/other"
+        assert other.renames == ["by_library"]
+        assert bv.renames == []
+
+    def test_print_uses_the_running_calls_output(self, backend):
+        backend.define_lib_function('def shout():\n    print("from the library")')
         assert "from the library" in backend.execute("h.lib.shout()").output
 
-    def test_a_saved_infinite_loop_uses_the_current_calls_timeout(self, config, tabs):
+    def test_timeout_checks_are_compiled_into_library_functions(self, config, tabs):
         config.execution_timeout_s = 0.2
         backend = PluginBackend(config, tabs_provider=lambda: tabs)
-        saved = backend.execute(
-            "def spin():\n    while True:\n        pass\nh.lib['spin'] = spin"
-        )
-        assert saved.success
+        backend.define_lib_function("def spin():\n    while True:\n        pass")
 
         result = backend.execute("h.lib.spin()")
         assert result.timed_out
         assert backend.executor.wait_for_idle(timeout=3)
         assert tabs[0].bv.reverted == 1
 
-    def test_a_captured_helper_follows_the_calling_targets_view(self, config, bv):
-        """A sibling function carries its own __globals__ — the defining call's
-        scope, with that call's bv. Left alone it writes to the binary the
-        library was written against, outside any transaction, and reports
-        success. The one remaining way a write could escape its target."""
-        other = type(bv)("other")
-        tabs = [
-            BinaryTab(0, "target", "/bin/target", bv),
-            BinaryTab(1, "other", "/bin/other", other),
-        ]
-        backend = PluginBackend(config, tabs_provider=lambda: tabs)
-        backend.execute(
-            "def helper():\n"
-            "    bv.rename('by_helper')\n"
-            "    return bv.file.filename\n"
-            "def port():\n"
-            "    return helper()\n"
-            'h.lib["port"] = port',
-            "target",
+    def test_local_imports_and_helpers_work(self, backend):
+        backend.define_lib_function(
+            "def dump(value):\n"
+            "    import json\n"
+            "    def wrapped():\n"
+            "        return {'value': value}\n"
+            "    return json.dumps(wrapped())"
         )
-        result = backend.execute("print(h.lib.port())", "other")
-        assert result.output.strip() == "/bin/other"
-        assert other.renames == ["by_helper"]
-        assert bv.renames == [], "the write must not land in the defining binary"
-
-    def test_captured_helpers_can_still_call_each_other(self, backend):
-        """They share one globals dict, so rebinding must not strand them."""
-        result = backend.execute(
-            "def a():\n    return 'a' + b()\n"
-            "def b():\n    return 'b'\n"
-            'h.lib["a"] = a\nprint(h.lib.a())'
-        )
-        assert result.output.strip() == "ab"
-
-    def test_a_stored_helper_does_not_retain_its_defining_scope(self, backend):
-        backend.execute(
-            "def helper():\n    return bv\n"
-            "def top():\n    return helper()\n"
-            'h.lib["top"] = top'
-        )
-        helper = backend.helpers.lib._entries["top"].captured["helper"]
-        assert helper.__globals__ == {}
-
-    def test_a_rebound_helper_keeps_keyword_defaults(self, backend):
-        result = backend.execute(
-            "def helper(*, limit=5):\n    return limit\n"
-            "def top():\n    return helper()\n"
-            'h.lib["top"] = top\nprint(h.lib.top())'
-        )
+        result = backend.execute("print(h.lib.dump(7))")
         assert result.success
-        assert result.output.strip() == "5"
+        assert result.output.strip() == '{"value": 7}'
 
-    def test_redefining_an_entry_mid_script_takes_effect(self, backend):
-        """A per-entry globals cache made the first definition win, so fixing a
-        saved function and re-testing it in one call silently ran the old one."""
-        result = backend.execute(
-            "A = 1\ndef f():\n    return A\n"
-            'h.lib["f"] = f\nprint(h.lib.f())\n'
-            "A = 2\ndef f2():\n    return A\n"
-            'h.lib["f"] = f2\nprint(h.lib.f())'
-        )
-        assert result.output.split() == ["1", "2"]
+    def test_top_level_dependencies_are_refused(self, backend):
+        with pytest.raises(ValueError, match="LIMIT"):
+            backend.define_lib_function("def over(value):\n    return value > LIMIT")
+        with pytest.raises(ValueError, match="helper"):
+            backend.define_lib_function("def top():\n    return helper()")
 
-    def test_the_live_globals_are_not_captured(self, backend):
-        """Capturing bv would pin the defining call's view for the session."""
-        backend.execute('def where():\n    return bv\nh.lib["where"] = where')
-        captured = backend.helpers.lib._entries["where"].captured
-        assert "bv" not in captured and "print" not in captured
+    def test_nested_function_global_reads_are_checked(self, backend):
+        with pytest.raises(ValueError, match="LIMIT"):
+            backend.define_lib_function(
+                "def top():\n"
+                "    def helper():\n"
+                "        return LIMIT\n"
+                "    return helper()"
+            )
 
-    def test_saved_functions_call_each_other_through_lib(self, backend):
-        backend.execute('def base():\n    return 6\nh.lib["base"] = base')
-        backend.execute(
-            'def doubled():\n    return h.lib.base() * 2\nh.lib["doubled"] = doubled'
-        )
+    def test_library_functions_call_each_other_dynamically(self, backend):
+        backend.define_lib_function("def base():\n    return 6")
+        backend.define_lib_function("def doubled():\n    return h.lib.base() * 2")
         assert backend.execute("print(h.lib.doubled())").output.strip() == "12"
 
-    def test_a_saved_function_keeps_the_imports_it_was_defined_with(self, backend):
-        """Rebinding replaces the function's globals wholesale, so without
-        carrying these the most ordinary script there is — import at the top,
-        use it in the function — raises NameError on the next call."""
-        backend.execute(
-            "import json\n"
-            'def dump():\n    return json.dumps({"a": 1})\nh.lib["dump"] = dump'
-        )
-        result = backend.execute("print(h.lib.dump())")
-        assert result.success, result.error
-        assert result.output.strip() == '{"a": 1}'
+        backend.define_lib_function("def base():\n    return 7")
+        assert backend.execute("print(h.lib.doubled())").output.strip() == "14"
 
-    def test_a_saved_function_keeps_the_constants_it_was_defined_with(self, backend):
-        backend.execute(
-            "THRESHOLD = 10\n"
-            "def over():\n    return [v for v in (5, 15) if v > THRESHOLD]\n"
-            'h.lib["over"] = over'
-        )
-        assert backend.execute("print(h.lib.over())").output.strip() == "[15]"
-
-    def test_a_saved_function_does_not_hold_the_defining_calls_binary(self, backend):
-        """Keeping the function object would pin its __globals__ — that call's
-        BinaryView, live long after the user closes the binary, plus every
-        large intermediate the script happened to leave at the top level."""
-        backend.execute(
-            'big = list(range(50000))\ndef tiny():\n    return 1\nh.lib["tiny"] = tiny'
-        )
-        captured = backend.helpers.lib._entries["tiny"].captured
-        assert "bv" not in captured
-        assert "big" not in captured
-
-    def test_the_calling_script_cannot_redefine_what_a_saved_function_means(
-        self, backend
-    ):
-        """Only the live globals come from the caller. Otherwise a name the
-        caller happened to bind would silently change the saved function."""
-        backend.execute(
-            'LIMIT = 1\ndef limit():\n    return LIMIT\nh.lib["limit"] = limit'
-        )
-        assert backend.execute("LIMIT = 99\nprint(h.lib.limit())").output.strip() == "1"
-
-    def test_a_name_the_saved_function_never_had_stays_missing(self, backend):
-        """It has to fail the same way whatever the caller has bound. If the
-        calling scope showed through, a saved function would quietly mean
-        something different depending on which script called it."""
-        backend.execute(
-            "def uses_missing():\n    return MISSING\n"
-            'h.lib["uses_missing"] = uses_missing'
-        )
-        result = backend.execute("MISSING = 5\nprint(h.lib.uses_missing())")
+        backend.remove_lib_function("base")
+        result = backend.execute("h.lib.doubled()")
         assert not result.success
-        assert "MISSING" in (result.error or "")
+        assert "No library function 'base'" in (result.error or "")
 
-    def test_reassigning_a_name_replaces_it(self, backend):
-        backend.execute('def f():\n    return 1\nh.lib["f"] = f')
-        backend.execute('def f():\n    return 2\nh.lib["f"] = f')
-        assert backend.execute("print(h.lib.f())").output.strip() == "2"
+    def test_replacing_a_definition_reports_it(self, backend):
+        backend.define_lib_function("def answer():\n    return 1")
+        message = backend.define_lib_function("def answer():\n    return 2")
+        assert message.startswith("Replaced h.lib.answer()")
+        assert backend.execute("print(h.lib.answer())").output.strip() == "2"
 
-    def test_the_key_names_the_entry_not_the_def(self, backend):
-        result = backend.execute(
-            'def collect():\n    return 7\nh.lib["port"] = collect\nprint(h.lib.port())'
+    def test_library_is_read_only_inside_execute(self, backend):
+        assignment = backend.execute("def nope():\n    return 1\nh.lib['nope'] = nope")
+        assert not assignment.success
+        assert "define_lib_function" in (assignment.error or "")
+
+        deletion = backend.execute("del h.lib['anything']")
+        assert not deletion.success
+        assert "remove_lib_function" in (deletion.error or "")
+
+        replacement = backend.execute("h.lib = {}")
+        assert not replacement.success
+        assert "define_lib_function" in (replacement.error or "")
+
+    def test_immutable_literal_defaults_are_accepted(self, backend):
+        backend.define_lib_function(
+            "def options(config=(-1, (2, None), b'x')):\n    return config"
         )
-        assert result.output.strip() == "7"
+        result = backend.execute("print(h.lib.options())")
+        assert result.output.strip() == "(-1, (2, None), b'x')"
 
-    def test_a_lambda_can_be_saved(self, backend):
-        """The key supplies the name, so `<lambda>` is no obstacle."""
-        result = backend.execute(
-            'h.lib["double"] = lambda n: n * 2\nprint(h.lib.double(21))'
+    @pytest.mark.parametrize(
+        "source",
+        [
+            "def bad(value=[]):\n    return value",
+            "def bad(value={}):\n    return value",
+            "def bad(value=set()):\n    return value",
+            "def bad(value=range(3)):\n    return value",
+        ],
+    )
+    def test_stateful_or_evaluated_defaults_are_refused(self, backend, source):
+        with pytest.raises(ValueError, match="immutable literal"):
+            backend.define_lib_function(source)
+
+    def test_annotations_are_deferred_and_not_retained(self, backend):
+        backend.define_lib_function(
+            "def identity(value: MissingType) -> OtherType:\n    return value"
         )
-        assert result.output.strip() == "42"
+        result = backend.execute("print(h.lib.identity.__annotations__)")
+        assert result.success
+        assert result.output.strip() == "{}"
 
-    def test_an_entry_may_be_named_like_a_mapping_method(self, backend):
-        """Any named method on the namespace would permanently shadow an entry
-        of that name, because __getattr__ only fires when lookup fails."""
-        result = backend.execute('h.lib["keys"] = lambda: "mine"\nprint(h.lib.keys())')
-        assert result.output.strip() == "mine"
+    @pytest.mark.parametrize(
+        ("source", "message"),
+        [
+            ("x = 1", "exactly one"),
+            ("def a():\n    pass\ndef b():\n    pass", "exactly one"),
+            ("async def a():\n    pass", "exactly one"),
+            ("@staticmethod\ndef a():\n    pass", "decorators"),
+            ("def _private():\n    pass", "underscore"),
+            ("def broken(", "Syntax error"),
+        ],
+    )
+    def test_invalid_definition_shapes_are_refused(self, backend, source, message):
+        with pytest.raises(ValueError, match=message):
+            backend.define_lib_function(source)
 
-    def test_source_comes_back_verbatim(self, backend):
-        backend.execute(
-            'def probe():\n    """Doc."""\n    return 1\nh.lib["probe"] = probe'
-        )
-        out = backend.execute("print(h.lib.probe.source)").output
-        assert "def probe():" in out
-        assert '"""Doc."""' in out
+    def test_remove_unknown_names_lists_what_exists(self, backend):
+        backend.define_lib_function("def real():\n    return 1")
+        with pytest.raises(ValueError, match="real"):
+            backend.remove_lib_function("missing")
 
-    def test_source_is_snapshotted_at_save_time(self, backend):
-        """Read lazily instead, it would be lost whenever the defining script's
-        text is gone — which is every path where linecache cannot be restored."""
-        backend.execute('def keeper():\n    return 1\nh.lib["keeper"] = keeper')
-        saved = backend.helpers.lib._entries["keeper"]
-        assert "def keeper():" in saved.source
+    def test_empty_listing_is_explicit(self, backend):
+        assert backend.list_lib_functions() == "No library functions are defined."
 
-    def test_attribute_assignment_saves_a_real_entry(self, backend):
-        """The obvious spelling. Falling through to the instance __dict__ would
-        skip every check and shadow the entry for attribute reads while the
-        subscript form and the footer still saw the saved function."""
-        result = backend.execute(
-            'def probe():\n    return "saved"\n'
-            "h.lib.probe = probe\nprint(h.lib.probe())"
-        )
-        assert result.output.strip() == "saved"
-        assert result.lib == ("probe",)
+    def test_source_is_available_on_the_runtime_function(self, backend):
+        backend.define_lib_function('def probe():\n    """Doc."""\n    return 1')
+        output = backend.execute("print(h.lib.probe.source)").output
+        assert "def probe():" in output
+        assert '"""Doc."""' in output
 
-    def test_attribute_assignment_is_validated_like_a_key(self, backend):
-        assert not backend.execute("h.lib.bad = 5").success
-
-    def test_the_librarys_own_state_cannot_be_reassigned_or_deleted(self, backend):
-        """Losing `_entries` would fail every later call, including calls that
-        never touch the library."""
-        assert not backend.execute("del h.lib._entries").success
-        assert not backend.execute("h.lib._entries = None").success
-        assert not backend.execute("h.lib = {}").success
-        assert backend.execute('print("still alive")').output.strip() == "still alive"
-
-    def test_a_broken_library_cannot_take_the_result_down(self, backend):
-        """Belt and braces for the footer: whatever state h.lib is left in, the
-        script's own output still comes back."""
-        object.__setattr__(backend.helpers.lib, "_entries", None)
-        result = backend.execute('print("output survives")')
-        assert result.output.strip() == "output survives"
-        assert result.lib == ()
-
-    def test_a_keyword_is_refused_as_a_name(self, backend):
-        """`h.lib["class"]` would be reachable by subscript only."""
-        assert not backend.execute('h.lib["class"] = lambda: 1').success
-
-    def test_a_traceback_inside_an_old_saved_function_quotes_its_source(self, backend):
-        """The defining script has long since aged out of the source cache, so
-        the entry has to be republished on retrieval or the frame that raised
-        comes back as a bare line number."""
-        backend.execute(
-            'def boom():\n    raise ValueError("inside")\nh.lib["boom"] = boom'
-        )
+    def test_an_old_function_traceback_still_quotes_source(self, backend):
+        backend.define_lib_function('def boom():\n    raise ValueError("inside")')
         for i in range(20):
             backend.execute(f"x = {i}")
         result = backend.execute("h.lib.boom()")
         assert not result.success
         assert 'raise ValueError("inside")' in (result.error or "")
 
-    def test_lib_sources_returns_every_definition(self, backend):
-        backend.execute('def a():\n    return 1\nh.lib["a"] = a')
-        backend.execute('def b():\n    return 2\nh.lib["b"] = b')
-        out = backend.execute("print(h.lib_sources())").output
-        assert "def a():" in out
-        assert "def b():" in out
-
-    def test_lib_sources_carries_what_each_function_needs(self, backend):
-        """It is advertised as what you paste into a new session, so bodies
-        alone are not enough — a carried import or constant that is missing
-        raises NameError on the first call."""
-        backend.execute(
-            "import json\n"
-            "LIMIT = 7\n"
-            "def summarise():\n"
-            "    return json.dumps({'limit': LIMIT})\n"
-            'h.lib["summarise"] = summarise'
-        )
-        dump = backend.execute("print(h.lib_sources())").output
-        assert "import json" in dump
-        assert "LIMIT = 7" in dump
-        assert "def summarise():" in dump
-        # Imports first: a constant sitting above the import it belongs with is
-        # valid Python that reads as though the two were unrelated.
-        assert dump.index("import json") < dump.index("LIMIT = 7")
-
-    def test_lib_sources_names_what_it_cannot_write_back(self, backend):
-        """Silently omitting it would produce a dump that looks complete and
-        is not."""
-        backend.execute(
-            "SPAN = range(3)\ndef uses():\n    return SPAN\nh.lib['uses'] = uses"
-        )
-        dump = backend.execute("print(h.lib_sources())").output
-        assert "SPAN" in dump
-        assert "re-supply this by hand" in dump
-
-    def test_the_listing_shows_signature_and_docstring(self, backend):
-        backend.execute(
-            'def unported(src=1):\n    """Names that differ."""\n'
-            '    return src\nh.lib["unported"] = unported'
-        )
-        out = backend.execute("print(h.lib)").output
-        assert "h.lib.unported(src=1)" in out
-        assert "Names that differ." in out
-
-    def test_an_empty_listing_says_how_to_save(self, backend):
-        assert 'h.lib["' in backend.execute("print(h.lib)").output
-
-    def test_del_removes_by_attribute_and_by_key(self, backend):
+    def test_retrieved_keyword_defaults_are_copies(self, backend):
+        backend.define_lib_function("def top(*, limit=5):\n    return limit")
         result = backend.execute(
-            'h.lib["a"] = lambda: 1\nh.lib["b"] = lambda: 2\n'
-            'del h.lib.a\ndel h.lib["b"]\nprint(len(h.lib))'
+            "h.lib.top.__kwdefaults__['limit'] = 99\nprint(h.lib.top())"
         )
-        assert result.output.strip() == "0"
-
-    def test_deleting_an_unknown_name_is_an_error(self, backend):
-        assert not backend.execute("del h.lib.nope").success
-
-    def test_an_unknown_name_lists_what_is_saved(self, backend):
-        backend.execute('h.lib["real"] = lambda: 1')
-        result = backend.execute("h.lib.nope()")
-        assert not result.success
-        assert "AttributeError" in (result.error or "")
-        assert "real" in (result.error or "")
-
-    def test_an_unknown_name_leaves_hasattr_usable(self, backend):
-        """Attribute access must raise AttributeError, not the KeyError a bare
-        delegation to __getitem__ would leak — hasattr() propagates the latter."""
-        result = backend.execute('print(hasattr(h.lib, "nope"))')
-        assert result.output.strip() == "False"
-
-    def test_a_captured_value_is_refused(self, backend):
-        """A closure freezes the defining call's `bv` inside the function —
-        precisely the staleness storing functions is meant to avoid."""
-        result = backend.execute(
-            "def outer():\n    captured = bv\n    def inner():\n"
-            "        return captured\n    return inner\n"
-            'h.lib["inner"] = outer()'
-        )
-        assert not result.success
-        assert "captur" in (result.error or "").lower()
-
-    def test_a_view_held_through_a_default_is_refused(self, backend):
-        """`def f(src=bv)` is exactly what the closure refusal tells you to do
-        instead, and it pins the defining call's view just as hard — worse now,
-        since a saved function is meant to run against whatever the call
-        targets."""
-        result = backend.execute(
-            'def where(src=bv):\n    return src.file.filename\nh.lib["where"] = where'
-        )
-        assert not result.success
-        assert "BinaryView" in (result.error or "")
-        assert "default argument" in (result.error or "")
-
-    def test_a_view_nested_in_a_default_is_refused(self, backend):
-        result = backend.execute(
-            'def where(sources=[bv]):\n    return sources[0]\nh.lib["where"] = where'
-        )
-        assert not result.success
-        assert "BinaryView" in (result.error or "")
-        assert "default argument 1[0]" in (result.error or "")
-
-    def test_a_view_held_through_a_top_level_name_is_refused(self, backend):
-        result = backend.execute(
-            "src = bv\ndef where():\n    return src.file.filename\n"
-            'h.lib["where"] = where'
-        )
-        assert not result.success
-        assert "top-level name 'src'" in (result.error or "")
-
-    def test_a_view_nested_in_a_top_level_mapping_is_refused(self, backend):
-        result = backend.execute(
-            "state = {'source': bv}\ndef where():\n    return state['source']\n"
-            'h.lib["where"] = where'
-        )
-        assert not result.success
-        assert "BinaryView" in (result.error or "")
-        assert "['source']" in (result.error or "")
-
-    def test_a_view_held_through_an_annotation_is_refused(self, backend):
-        result = backend.execute(
-            'def where(x: bv = 1):\n    return x\nh.lib["where"] = where'
-        )
-        assert not result.success
-        assert "annotation" in (result.error or "")
-
-    def test_a_view_nested_in_a_generic_alias_is_refused(self, backend):
-        result = backend.execute(
-            'def where(x: list[bv] = None):\n    return x\nh.lib["where"] = where'
-        )
-        assert not result.success
-        assert "BinaryView" in (result.error or "")
-        assert "argument 1" in (result.error or "")
-
-    def test_the_refusal_says_to_take_the_view_as_a_parameter(self, backend):
-        """The message has to name the fix, or it just moves the guessing."""
-        result = backend.execute(
-            'def where(src=bv):\n    return src\nh.lib["where"] = where'
-        )
-        assert "h.read_only_view" in (result.error or "")
-
-    def test_ordinary_defaults_are_still_accepted(self, backend):
-        """The check must not cost the normal spelling."""
-        result = backend.execute(
-            "def top(limit=5, *, deep=False):\n    return (limit, deep)\n"
-            'h.lib["top"] = top\nprint(h.lib.top())'
-        )
-        assert result.success
-        assert result.output.strip() == "(5, False)"
-
-    def test_nested_plain_containers_are_accepted(self, backend):
-        result = backend.execute(
-            "CONFIG = {'limits': [2, 5], 'flags': {True}}\n"
-            "def top():\n    return CONFIG['limits'][-1]\n"
-            'h.lib["top"] = top\nprint(h.lib.top())'
-        )
-        assert result.success
         assert result.output.strip() == "5"
 
-    def test_cyclic_plain_containers_do_not_recurse_forever(self, backend):
-        result = backend.execute(
-            "CYCLE = []\nCYCLE.append(CYCLE)\n"
-            "def depth():\n    return CYCLE[0] is CYCLE\n"
-            'h.lib["depth"] = depth\nprint(h.lib.depth())'
-        )
-        assert result.success
-        assert result.output.strip() == "True"
-
-    def test_an_opaque_stateful_capture_is_refused(self, backend):
-        result = backend.execute(
-            "class Box:\n    pass\n"
-            "box = Box()\ndef get_box():\n    return box\n"
-            'h.lib["get_box"] = get_box'
-        )
-        assert not result.success
-        assert "opaque stateful Box" in (result.error or "")
-
-    def test_a_captured_helper_closure_is_refused(self, backend):
-        result = backend.execute(
-            "def make_helper():\n"
-            "    source = bv\n"
-            "    def helper():\n"
-            "        return source\n"
-            "    return helper\n"
-            "helper = make_helper()\n"
-            "def indirect():\n"
-            "    return helper()\n"
-            'h.lib["indirect"] = indirect'
-        )
-        assert not result.success
-        assert "helper function with a closure" in (result.error or "")
-
-    def test_a_helper_attribute_cannot_hide_a_view(self, backend):
-        result = backend.execute(
-            "def helper():\n    pass\n"
-            "helper.source = bv\n"
-            "def indirect():\n    return helper.source\n"
-            'h.lib["indirect"] = indirect'
-        )
-        assert not result.success
-        assert "BinaryView" in (result.error or "")
-        assert "attribute 'source'" in (result.error or "")
-
-    def test_a_function_nested_in_retained_state_is_refused(self, backend):
-        result = backend.execute(
-            "def helper():\n    return bv\n"
-            "state = [helper]\n"
-            "def indirect():\n    return state[0]()\n"
-            'h.lib["indirect"] = indirect'
-        )
-        assert not result.success
-        assert "function nested in retained state" in (result.error or "")
-
-    def test_a_bound_method_cannot_hide_a_view(self, backend):
-        result = backend.execute(
-            "take = [bv].pop\n"
-            "def indirect():\n    return take()\n"
-            'h.lib["indirect"] = indirect'
-        )
-        assert not result.success
-        assert "BinaryView" in (result.error or "")
-        assert "receiver" in (result.error or "")
-
-    def test_a_script_defined_class_is_refused(self, backend):
-        result = backend.execute(
-            "class State:\n    source = bv\n"
-            "def indirect():\n    return State.source\n"
-            'h.lib["indirect"] = indirect'
-        )
-        assert not result.success
-        assert "stateful script-defined class" in (result.error or "")
-
-    def test_a_function_from_another_module_is_refused(self, backend):
-        """Rebinding it would strip the globals its own module needs."""
-        result = backend.execute('import json\nh.lib["dumps"] = json.dumps')
-        assert not result.success
-        assert "defined in your script" in (result.error or "")
-
-    def test_a_non_function_is_refused(self, backend):
-        assert not backend.execute('h.lib["c"] = 5').success
-        assert not backend.execute('h.lib["c"] = len').success
-        assert not backend.execute('h.lib["c"] = str').success
-
-    def test_a_private_name_is_refused(self, backend):
-        """Underscore names are where the namespace keeps its own state."""
-        assert not backend.execute('h.lib["_entries"] = lambda: 1').success
-
-    def test_a_failed_script_keeps_its_definitions(self, backend):
-        """A definition is not a database change: the undo transaction reverts
-        the binary, and leaving the definition is what lets the next call fix
-        the caller without re-emitting the function."""
-        result = backend.execute('h.lib["kept"] = lambda: 1\nraise ValueError("boom")')
-        assert not result.success
-        assert backend.execute("print(len(h.lib))").output.strip() == "1"
-
-    def test_saved_names_ride_back_on_the_result(self, backend):
-        """The footer is the only thing that keeps the library visible; without
-        it the model forgets what it is holding."""
-        backend.execute('h.lib["one"] = lambda: 1')
+    def test_footer_always_lists_saved_names(self, backend):
+        backend.define_lib_function("def one():\n    return 1")
         assert backend.execute("pass").lib == ("one",)
+
+    def test_subscript_lookup_remains_available(self, backend):
+        backend.define_lib_function("def answer():\n    return 42")
+        assert backend.execute("print(h.lib['answer']())").output.strip() == "42"
+
+    def test_concurrent_definitions_do_not_lose_entries(self, backend):
+        sources = [f"def helper_{i}():\n    return {i}" for i in range(20)]
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            list(pool.map(backend.define_lib_function, sources))
+        assert set(backend.helpers.lib._names()) == {f"helper_{i}" for i in range(20)}
 
 
 class TestStatusReport:

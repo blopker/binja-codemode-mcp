@@ -81,7 +81,7 @@ Then ask for work directly:
 |---|---|
 | `bv` | The writable `BinaryView` selected by `target` |
 | `bn` | The `binaryninja` module |
-| `h` | `binaries()`, `read_only_view(name)`, `lib`, and `lib_sources()` |
+| `h` | `binaries()`, `read_only_view(name)`, and read-only `lib` |
 
 Builtins, imports, and filesystem access work. Return data with `print()`. Output is
 limited to 32 KB, errors retain 4 KB, and calls time out after 30 seconds.
@@ -98,16 +98,20 @@ transaction always rolls back; a detected write also fails the call.
 
 ### Saved functions
 
-Calls do not share variables or imports. Save reusable functions with:
+Calls do not share variables or imports. Use `define_lib_function` to store one
+self-contained function:
 
 ```python
-h.lib["name"] = function
+def named(view):
+    return [f.name for f in view.functions if not f.symbol.auto]
 ```
 
-Call one later as `h.lib.name()`. It runs against the current database rather than
-caching a result. `print(h.lib)` lists saved functions and `h.lib_sources()` exports
-them. Captures are limited to imports, functions, and plain data; pass live or
-stateful objects as arguments.
+Call it later from `execute` as `h.lib.named(bv)`. It runs against that call's
+database rather than caching a result. Put imports and helpers inside, pass other
+values as arguments, and use only immutable literal defaults. Use
+`list_lib_functions` to inspect or export definitions and `remove_lib_function` to
+delete one. Functions may call other saved functions through `h.lib`; a missing
+dependency raises normally.
 
 ## Configuration and safety
 
