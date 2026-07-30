@@ -16,6 +16,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from .artifact import WRITE_CHARS, ArtifactSink, ArtifactSpec
 from .session import same_view
 
 # Scripts are compiled under a unique pseudo-filename per call, and their text
@@ -142,6 +143,9 @@ class ExecutionResult:
     timeout_s: float = 0.0
     reverted: bool = False
     lib: tuple[str, ...] = field(default_factory=tuple)
+    artifact_path: str | None = None
+    artifact_status: str | None = None
+    artifact_bytes: int = 0
 
 
 @dataclass
@@ -159,6 +163,7 @@ class _Outcome:
     abandoned: bool = False  # set by the caller, read by the worker
     settling: bool = False  # the script finished; transactions are closing
     settled: bool = False  # the worker closed its transactions and is done
+    finalize_lock: threading.Lock = field(default_factory=threading.Lock)
 
 
 class _Budget:
@@ -202,15 +207,72 @@ class _Budget:
         self._size += len(clipped.encode("utf-8"))
         self._truncated = True
 
-    def value(self) -> str:
+    def value(self, full_output: bool = False) -> str:
         out = "".join(self._chunks[:])  # snapshot first; the writer may still run
         truncated = self._truncated
         if not truncated:
             return out
-        return out + (
-            f"\n... (truncated at {self.max_bytes} bytes; "
-            "rerun a narrower script or print a smaller slice)"
+        remedy = (
+            "full output is in the artifact below"
+            if full_output
+            else "rerun a narrower script or print a smaller slice"
         )
+        return out + (f"\n... (truncated at {self.max_bytes} bytes; {remedy})")
+
+
+class _CapturedOutput:
+    """A bounded preview optionally teeing complete output to disk."""
+
+    def __init__(self, preview_bytes: int, artifact: ArtifactSink | None) -> None:
+        self.budget = _Budget(preview_bytes)
+        self.artifact = artifact
+        self._lock = threading.Lock()
+        self._active = True
+
+    def write(self, text: str) -> None:
+        # A chunk-sized lock lets a timeout stop a huge print promptly.
+        for start in range(0, len(text), WRITE_CHARS):
+            chunk = text[start : start + WRITE_CHARS]
+            with self._lock:
+                if not self._active:
+                    return
+                if self.artifact is not None:
+                    self.artifact.write(chunk)
+                self.budget.write(chunk)
+
+    def finish(self, success: bool) -> None:
+        with self._lock:
+            if not self._active:
+                return
+            try:
+                if self.artifact is not None:
+                    self.artifact.finish(success)
+            finally:
+                self._active = False
+
+    def discard(self) -> None:
+        with self._lock:
+            if not self._active:
+                return
+            try:
+                if self.artifact is not None:
+                    self.artifact.discard()
+            finally:
+                self._active = False
+
+    def value(self) -> str:
+        with self._lock:
+            return self.budget.value(full_output=self.artifact is not None)
+
+    def artifact_fields(self) -> dict[str, Any]:
+        with self._lock:
+            if self.artifact is None or self.artifact.status == "discarded":
+                return {}
+            return {
+                "artifact_path": str(self.artifact.path),
+                "artifact_status": self.artifact.status,
+                "artifact_bytes": self.artifact.bytes_written,
+            }
 
 
 @dataclass
@@ -373,6 +435,7 @@ class CodeExecutor:
         on_call: Callable[[dict[str, Any], Batch], None] | None = None,
         watcher_factory: Callable[[Any], Any] | None = None,
         read_only: bool = False,
+        artifact_spec: ArtifactSpec | None = None,
     ) -> ExecutionResult:
         if target is None:
             return ExecutionResult(
@@ -415,12 +478,16 @@ class CodeExecutor:
         # refused for the life of the process.
         started = time.time()
         outcome = _Outcome()
-        budget = _Budget(self.max_output_bytes)
+        artifact: ArtifactSink | None = None
+        output: _CapturedOutput | None = None
         batch = Batch(
             watcher_factory,
             report_read_only_writes=not read_only,
         )
         try:
+            if artifact_spec is not None:
+                artifact = ArtifactSink(artifact_spec)
+            output = _CapturedOutput(self.max_output_bytes, artifact)
             publish_source(script_name, code)
             self._started_at = started
             self._running_target = target_name
@@ -436,9 +503,9 @@ class CodeExecutor:
                 # clipped.
                 for index, arg in enumerate(args):
                     if index:
-                        budget.write(sep)
-                    budget.write(str(arg))
-                budget.write(end)
+                        output.write(sep)
+                    output.write(str(arg))
+                output.write(end)
 
             def check_timeout() -> None:
                 if outcome.abandoned:
@@ -460,6 +527,9 @@ class CodeExecutor:
             if on_call is not None:
                 on_call(scope, batch)
         except BaseException as e:  # nothing ran; hand the lock back
+            if output is not None:
+                with contextlib.suppress(Exception):
+                    output.discard()
             self._started_at = None
             self._running_target = None
             self._idle.set()
@@ -471,6 +541,7 @@ class CodeExecutor:
             )
 
         def run() -> None:
+            executed = False
             try:
                 try:
                     batch.open_target(target, target_name, read_only=read_only)
@@ -481,6 +552,7 @@ class CodeExecutor:
                     )
                     return
                 try:
+                    executed = True
                     exec(compiled, scope, scope)
                 except _Abandoned:
                     # A checkpoint raised after the caller marked the script
@@ -516,9 +588,28 @@ class CodeExecutor:
                         f"{outcome.error}\n\n{failure}" if outcome.error else failure
                     )
             finally:
-                # Set before releasing the lock: the caller reads `settled` to
-                # decide whether a script that outran the deadline still landed.
-                outcome.settled = True
+                # Artifact publication and the settled flag share a lock with
+                # timeout finalization, so a response cannot race a successful
+                # rename and misreport it as timed out.
+                with outcome.finalize_lock:
+                    try:
+                        if executed:
+                            output.finish(
+                                success=not outcome.error and not outcome.abandoned
+                            )
+                        else:
+                            output.discard()
+                    except BaseException as e:
+                        note = (
+                            f"Failed to finalize artifact output: "
+                            f"{type(e).__name__}: {e}"
+                        )
+                        outcome.error = (
+                            f"{outcome.error}\n\n{note}" if outcome.error else note
+                        )
+                    # Set before releasing the lock: the caller reads `settled`
+                    # to decide whether a script that outran the deadline landed.
+                    outcome.settled = True
                 self._started_at = None
                 self._running_target = None
                 self._idle.set()
@@ -528,6 +619,8 @@ class CodeExecutor:
         try:
             thread.start()
         except BaseException as e:
+            with contextlib.suppress(Exception):
+                output.discard()
             self._started_at = None
             self._running_target = None
             self._idle.set()
@@ -545,7 +638,17 @@ class CodeExecutor:
         # reported as discarded while its changes had in fact landed, and the
         # model would re-run it and apply everything twice.
         if not outcome.settled:
-            outcome.abandoned = True
+            artifact_failure: str | None = None
+            with outcome.finalize_lock:
+                if not outcome.settled:
+                    outcome.abandoned = True
+                    try:
+                        output.finish(success=False)
+                    except BaseException as e:
+                        artifact_failure = (
+                            f"Failed to finalize artifact output: "
+                            f"{type(e).__name__}: {e}"
+                        )
             # A loop or function checkpoint sees `abandoned` at its next safe
             # point. Give ordinary Python a moment to unwind and revert.
             if not outcome.settling:
@@ -572,34 +675,38 @@ class CodeExecutor:
                 )
             return ExecutionResult(
                 success=False,
-                output=budget.value(),
+                output=output.value(),
                 elapsed_s=elapsed,
                 timeout_s=self.timeout,
                 error=(
                     f"Execution timed out after {elapsed:.1f}s (limit "
                     f"{self.timeout}s): {detail} Partial output above. Narrow the "
                     "work: filter before iterating, or process in batches."
+                    + (f"\n\n{artifact_failure}" if artifact_failure else "")
                 ),
                 timed_out=True,
+                **output.artifact_fields(),
             )
 
-        output = budget.value()
+        captured = output.value()
         elapsed = time.time() - started
         if outcome.error:
             return ExecutionResult(
                 success=False,
-                output=output,
+                output=captured,
                 error=outcome.error,
                 elapsed_s=elapsed,
                 timeout_s=self.timeout,
                 reverted=outcome.reverted,
+                **output.artifact_fields(),
             )
         return ExecutionResult(
             success=True,
-            output=output,
+            output=captured,
             elapsed_s=elapsed,
             timeout_s=self.timeout,
             reverted=outcome.reverted,
+            **output.artifact_fields(),
         )
 
     def running_script(self) -> tuple[str | None, float] | None:

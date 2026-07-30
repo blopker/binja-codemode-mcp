@@ -6,8 +6,10 @@
 - Each call is one undo transaction on `target`; an exception rolls it back.
 - Calls time out after 30 seconds. Filter before iterating and split large jobs; use
   the `[1.4s of 30s]` result footer to size the next batch.
-- `print()` returns up to 32 KB; errors keep their last 4 KB. If truncated, rerun a
-  narrower script or print a slice. Print addresses as hex.
+- `print()` returns a 32 KB preview; errors keep their last 4 KB. For complete
+  output, pass an existing absolute `output_directory` and an alphanumeric
+  `output_extension`. The server streams at most 100 MiB to a generated file,
+  using `.partial` while running and `.failed` on error. Print addresses as hex.
 - Do not call Qt, `binaryninjaui`, or `PySide6`: scripts run off the GUI thread.
 - Do not use `bv` or `h.read_only_view()` as a context manager; exiting closes the
   user's view. A view opened by `bn.load(path)` is yours and may use `with`.
@@ -202,9 +204,6 @@ removing `other` makes the caller fail normally.
 
 ## Verification
 
-Read every edit back. For tables, decode sample records and check width, count, stride,
-end address, padding, and boundary entries. For functions, print the final name,
-prototype, and focused IL. Verify comments with `bv.get_comment_at(addr)`.
-
-Inspect first, remove only conflicts, apply types and annotations, then read them
-back and inspect the resulting IL.
+Read edits back and inspect the resulting IL. For tables, check sample records,
+width, count, stride, padding, and boundaries. Verify comments with
+`bv.get_comment_at(addr)`.

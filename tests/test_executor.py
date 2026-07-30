@@ -2,9 +2,11 @@
 
 import textwrap
 import time
+from pathlib import Path
 
 import pytest
 
+from binja_codemode_mcp.plugin.artifact import ArtifactSpec
 from binja_codemode_mcp.plugin.executor import (
     KEEP_SOURCES,
     SCRIPT_PREFIX,
@@ -531,6 +533,79 @@ class TestOutput:
         # of the test session.
         stop.set()
         executor.wait_for_idle(timeout=5)
+
+
+class TestArtifactOutput:
+    def _spec(self, tmp_path):
+        return ArtifactSpec.build(
+            str(tmp_path),
+            "txt",
+            target_name="Firmware",
+            target_path="/tmp/Firmware.bndb",
+            target_id="binary-1",
+        )
+
+    def test_complete_output_is_streamed_while_the_preview_stays_bounded(
+        self, bv, tmp_path
+    ):
+        result = CodeExecutor(max_output_bytes=100).execute(
+            "print('x' * 10_000)",
+            target=bv,
+            artifact_spec=self._spec(tmp_path),
+        )
+        assert result.success
+        assert "truncated" in result.output
+        assert "full output is in the artifact" in result.output
+        assert result.artifact_status == "success"
+        path = Path(result.artifact_path or "")
+        assert path.read_text() == "x" * 10_000 + "\n"
+        assert result.artifact_bytes == 10_001
+        assert not list(tmp_path.glob("*.partial"))
+
+    def test_an_exception_publishes_failed_output(self, bv, tmp_path):
+        result = CodeExecutor().execute(
+            "print('before')\nraise ValueError('boom')",
+            target=bv,
+            artifact_spec=self._spec(tmp_path),
+        )
+        assert not result.success
+        assert result.artifact_status == "failed"
+        assert result.artifact_path is not None
+        assert result.artifact_path.endswith(".txt.failed")
+        assert (tmp_path / Path(result.artifact_path).name).read_text() == "before\n"
+
+    def test_timeout_closes_the_failed_file_and_discards_later_output(
+        self, bv, tmp_path
+    ):
+        import threading
+
+        gate = threading.Event()
+        executor = CodeExecutor(timeout=0.05)
+        result = executor.execute(
+            "print('before')\ngate.wait(5)\nprint('after')",
+            target=bv,
+            extra={"gate": gate},
+            artifact_spec=self._spec(tmp_path),
+        )
+        assert result.timed_out
+        assert result.artifact_status == "failed"
+        path = Path(result.artifact_path or "")
+        before = path.read_bytes()
+        assert before == b"before\n"
+        assert not list(tmp_path.glob("*.partial"))
+
+        gate.set()
+        executor.wait_for_idle(timeout=5)
+        assert path.read_bytes() == before
+
+    def test_syntax_error_creates_no_artifact(self, bv, tmp_path):
+        result = CodeExecutor().execute(
+            "def broken(",
+            target=bv,
+            artifact_spec=self._spec(tmp_path),
+        )
+        assert not result.success
+        assert list(tmp_path.iterdir()) == []
 
 
 class TestErrors:

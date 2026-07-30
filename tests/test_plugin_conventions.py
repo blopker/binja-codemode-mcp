@@ -17,6 +17,11 @@ ROOT = Path(__file__).resolve().parent.parent
 PACKAGE = ROOT / "src" / "binja_codemode_mcp"
 
 
+def test_pytest_temporary_files_stay_in_the_workspace(tmp_path):
+    expected = (ROOT / "test-output").resolve()
+    assert tmp_path.resolve().is_relative_to(expected)
+
+
 class TestImportOrder:
     def test_binaryninjaui_is_imported_before_pyside6(self):
         """Binary Ninja's docs require this order.

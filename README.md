@@ -83,9 +83,18 @@ Then ask for work directly:
 | `bn` | The `binaryninja` module |
 | `h` | `binaries()`, `read_only_view(name)`, and read-only `lib` |
 
-Builtins, imports, and filesystem access work. Return data with `print()`. Output is
-limited to 32 KB, errors retain 4 KB, and calls time out after 30 seconds. If output
-is truncated, rerun a narrower script or print a smaller slice.
+Builtins, imports, and filesystem access work. Return data with `print()`. Calls time
+out after 30 seconds; results include a 32 KB preview and retain 4 KB of errors.
+
+For complete output, pass an existing absolute `output_directory` and an
+`output_extension` of 1–16 letters or digits. The server streams up to 100 MiB into
+an exclusively created name containing the target, stable ID, UTC start time, and
+random suffix. It ends in `.partial` while running, loses that suffix on success,
+and becomes `.failed` after any execution failure:
+
+```text
+binja-{target}-{binary-id}-{YYYYMMDDTHHMMSSZ}-{8-hex}.{extension}.partial
+```
 
 ### Multiple binaries
 

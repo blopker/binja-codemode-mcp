@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..config import Config
+from .artifact import ArtifactSpec
 from .executor import (
     TIMEOUT_CHECK_GLOBAL,
     Batch,
@@ -27,6 +28,7 @@ from .executor import (
     publish_source,
 )
 from .guide import render
+from .logging import log_message
 from .session import BinarySession, BinaryTab, same_view
 
 # Supplied fresh on every call, so a saved function must never carry the
@@ -504,7 +506,7 @@ class PluginBackend:
 
     def define_lib_function(self, source: str) -> str:
         result = self.helpers.lib._define(source)
-        self._log(f"Code Mode MCP: {result}")
+        self._log(result)
         return result
 
     def list_lib_functions(self) -> str:
@@ -512,7 +514,7 @@ class PluginBackend:
 
     def remove_lib_function(self, name: str) -> str:
         result = self.helpers.lib._remove(name)
-        self._log(f"Code Mode MCP: {result}")
+        self._log(result)
         return result
 
     def execute(
@@ -521,8 +523,17 @@ class PluginBackend:
         target: Any = None,
         description: str | None = None,
         read_only: bool = False,
+        output_directory: str | None = None,
+        output_extension: str | None = None,
     ) -> ExecutionResult:
-        result = self._execute(code, target, description, read_only)
+        result = self._execute(
+            code,
+            target,
+            description,
+            read_only,
+            output_directory,
+            output_extension,
+        )
         # Every result carries the library, including the failures: a script
         # that saved a function and then raised keeps the definition, and the
         # footer is the only place either side can see that. Never at the cost
@@ -540,12 +551,34 @@ class PluginBackend:
         target: Any,
         description: str | None = None,
         read_only: bool = False,
+        output_directory: str | None = None,
+        output_extension: str | None = None,
     ) -> ExecutionResult:
         try:
             tab = self.session.resolve(target)
         except LookupError as e:
-            self._log(f"Code Mode MCP: refused — {e}")
+            self._log(f"refused — {e}")
             return ExecutionResult(success=False, output="", error=str(e))
+
+        artifact_spec: ArtifactSpec | None = None
+        if (output_directory is None) != (output_extension is None):
+            error = (
+                "`output_directory` and `output_extension` must be provided together."
+            )
+            self._log(f"refused — {error}")
+            return ExecutionResult(success=False, output="", error=error)
+        if output_directory is not None and output_extension is not None:
+            try:
+                artifact_spec = ArtifactSpec.build(
+                    output_directory,
+                    output_extension,
+                    target_name=tab.name,
+                    target_path=tab.path,
+                    target_id=self.session.identifier(tab) or "binary",
+                )
+            except ValueError as e:
+                self._log(f"refused — {e}")
+                return ExecutionResult(success=False, output="", error=str(e))
 
         # The log is where the user watches what is being done to their
         # database, so say what and to which one before it happens rather than
@@ -553,7 +586,7 @@ class PluginBackend:
         # no trace at all.
         said = f" — {description}" if description else ""
         mode = "querying" if read_only else "running"
-        self._log(f"Code Mode MCP: {mode} on {tab.name}{said}")
+        self._log(f"{mode} on {tab.name}{said}")
 
         def on_call(scope: dict[str, Any], batch: Batch) -> None:
             self.helpers.bind_call(scope, batch, tab)
@@ -570,6 +603,7 @@ class PluginBackend:
             on_call=on_call,
             watcher_factory=self._watcher_factory,
             read_only=read_only,
+            artifact_spec=artifact_spec,
         )
         if result.timed_out:
             verdict = "timed out"
@@ -577,14 +611,14 @@ class PluginBackend:
             verdict = "ok, rolled back" if read_only else "ok"
         else:
             verdict = "failed" + (", rolled back" if result.reverted else "")
-        self._log(f"Code Mode MCP: {verdict} in {result.elapsed_s:.1f}s")
+        self._log(f"{verdict} in {result.elapsed_s:.1f}s")
         return result
 
     def _log(self, message: str) -> None:
         if self.log is None:
             return
         with contextlib.suppress(Exception):  # logging must never take a call down
-            self.log(message)
+            self.log(log_message(message))
 
     def running_script(self) -> tuple[str | None, float] | None:
         """A script in flight, for the status indicator to warn about."""
@@ -632,13 +666,13 @@ def render_status_report(
     """
     if endpoint is None:
         return (
-            "Code Mode MCP: NOT RUNNING\n\n"
+            f"{log_message('NOT RUNNING')}\n\n"
             "Start it from Plugins > Code Mode MCP > Start Server, "
             "or click the indicator in the status bar."
         )
 
     lines = [
-        "Code Mode MCP: RUNNING",
+        log_message("RUNNING"),
         "",
         f"  Endpoint: {endpoint}",
         f"  API key:  {api_key}",

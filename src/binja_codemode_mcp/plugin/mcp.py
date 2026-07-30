@@ -33,17 +33,19 @@ set `read_only` for queries. Omit `target` only when one binary is open.
 
 Read `binja_guide` before non-trivial work. Change only what evidence supports;
 record uncertainty in comments. Reusable functions are managed with
-`define_lib_function`, `list_lib_functions`, and `remove_lib_function`."""
+`define_lib_function`, `list_lib_functions`, and `remove_lib_function`. For complete
+large output, pass `output_directory` and `output_extension`."""
 
 EXECUTE_DESCRIPTION = """\
 Run Python with `bv` (the selected `target` BinaryView), `bn` (binaryninja), and
 `h` (`binaries()`, `read_only_view(name)`, read-only `lib`). Builtins and imports work.
 
 An exception rolls back the call; `read_only=true` always rolls it back. The limit
-is 30 seconds. Return data with `print()` (32 KB max; errors keep 4 KB); filter
-before decompiling and print addresses as hex. Calls are stateless except functions
-managed by the lib tools and called as `h.lib.name()`. Read `binja_guide` before
-non-trivial work."""
+is 30 seconds. Return data with `print()` (32 KB preview; errors keep 4 KB);
+`output_directory` plus `output_extension` streams up to 100 MiB to a generated
+file. Filter before decompiling and print addresses as hex. Calls are stateless
+except functions managed by the lib tools and called as `h.lib.name()`. Read
+`binja_guide` before non-trivial work."""
 
 GUIDE_DESCRIPTION = """\
 Return live session details and concise guidance for safe queries and edits."""
@@ -69,6 +71,8 @@ class Backend(Protocol):
         target: Any = None,
         description: Any = None,
         read_only: bool = False,
+        output_directory: str | None = None,
+        output_extension: str | None = None,
     ) -> Any: ...
     def define_lib_function(self, source: str) -> str: ...
     def list_lib_functions(self) -> str: ...
@@ -208,6 +212,18 @@ class MCPHandler:
                                 "Always roll back every view; use for queries."
                             ),
                         },
+                        "output_directory": {
+                            "type": "string",
+                            "description": (
+                                "Existing absolute directory for complete output."
+                            ),
+                        },
+                        "output_extension": {
+                            "type": "string",
+                            "description": (
+                                "Artifact extension: 1–16 letters or digits."
+                            ),
+                        },
                         "description": {
                             "type": "string",
                             "description": "Short log label.",
@@ -286,7 +302,25 @@ class MCPHandler:
             read_only = args.get("read_only", False)
             if not isinstance(read_only, bool):
                 return _tool_error("`read_only` must be a boolean.")
-            result = self.backend.execute(code, target, note, read_only)
+            output_directory = args.get("output_directory")
+            if output_directory is not None and not isinstance(output_directory, str):
+                return _tool_error("`output_directory` must be a string.")
+            output_extension = args.get("output_extension")
+            if output_extension is not None and not isinstance(output_extension, str):
+                return _tool_error("`output_extension` must be a string.")
+            if (output_directory is None) != (output_extension is None):
+                return _tool_error(
+                    "`output_directory` and `output_extension` must be provided "
+                    "together."
+                )
+            result = self.backend.execute(
+                code,
+                target,
+                note,
+                read_only,
+                output_directory,
+                output_extension,
+            )
 
             # Reserve the footer and the error out of the budget first, then
             # give the rest to output. The footer is concatenated after the
@@ -296,13 +330,14 @@ class MCPHandler:
                 getattr(result, "timeout_s", None),
                 tuple(getattr(result, "lib", ()) or ()),
             )
+            artifact = _artifact_note(result)
             tail = ""
             if result.error:
                 note = _ROLLBACK_NOTE if getattr(result, "reverted", False) else ""
                 room = MAX_ERROR_BYTES - _size(_ERROR_PREFIX) - _size(note)
                 tail = _ERROR_PREFIX + _clip_error(result.error, room) + note
 
-            allowance = MAX_RESULT_BYTES - _size(footer)
+            allowance = MAX_RESULT_BYTES - _size(footer) - _size(artifact)
             if tail:
                 allowance -= MAX_ERROR_BYTES
             body = _clip_head(result.output, allowance) if result.output else ""
@@ -310,7 +345,7 @@ class MCPHandler:
                 body = "(no output — the script printed nothing)"
 
             return {
-                "content": [{"type": "text", "text": body + tail + footer}],
+                "content": [{"type": "text", "text": body + tail + artifact + footer}],
                 "isError": not result.success,
             }
 
@@ -444,6 +479,18 @@ def _footer(elapsed: float, budget: float | None, lib: tuple[str, ...] = ()) -> 
     if not lib:
         return f"\n\n[{timing}]"
     return f"\n\n[{timing} | lib: {_lib_names(lib)}]"
+
+
+def _artifact_note(result: Any) -> str:
+    path = getattr(result, "artifact_path", None)
+    if not path:
+        return ""
+    status = getattr(result, "artifact_status", "unknown")
+    size = int(getattr(result, "artifact_bytes", 0) or 0)
+    return _clip_head(
+        f"\n\nOutput artifact ({status}, {size} bytes): {path}",
+        MAX_MESSAGE_BYTES,
+    )
 
 
 def _lib_names(lib: tuple[str, ...]) -> str:

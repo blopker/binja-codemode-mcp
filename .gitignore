@@ -5,6 +5,7 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .ruff_cache/
+test-output/
 scratch/
 
 # Working docs for the in-flight rewrite. Their reasoning moves into code

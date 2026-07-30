@@ -136,7 +136,13 @@ class TestGuideContent:
         text = guide_text()
         assert "32 KB" in text
         assert "4 KB" in text
-        assert "narrower script" in text
+
+    def test_documents_complete_output_artifacts(self):
+        text = guide_text()
+        assert "output_directory" in text
+        assert "output_extension" in text
+        assert "100 MiB" in text
+        assert ".partial" in text and ".failed" in text
 
     def test_documents_stable_ids_and_query_mode(self):
         text = guide_text()

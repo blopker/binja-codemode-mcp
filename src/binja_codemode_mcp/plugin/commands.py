@@ -8,6 +8,7 @@ from binaryninja.log import log_error, log_info
 
 from ..config import Config
 from .backend import PluginBackend, render_status_report
+from .logging import log_message
 from .mcp import MCPHandler
 from .server import MCPHTTPServer
 from .uicontext import list_tabs
@@ -46,10 +47,10 @@ class BinjaCodeModeMCP:
 
     def start_server(self, bv: object = None) -> None:
         if self.is_shutting_down:
-            log_error("Code Mode MCP: still shutting down.")
+            log_error(log_message("still shutting down."))
             return
         if self.is_running:
-            log_error("Code Mode MCP: already running.")
+            log_error(log_message("already running."))
             return
 
         try:
@@ -69,7 +70,7 @@ class BinjaCodeModeMCP:
             )
             endpoint = server.start()
         except Exception as e:
-            log_error(f"Code Mode MCP: failed to start: {e}")
+            log_error(log_message(f"failed to start: {e}"))
             update_status(False)
             return
 
@@ -90,10 +91,10 @@ class BinjaCodeModeMCP:
 
     def stop_server(self, bv: object = None) -> None:
         if self.is_shutting_down:
-            log_error("Code Mode MCP: already shutting down.")
+            log_error(log_message("already shutting down."))
             return
         if self._server is None:
-            log_error("Code Mode MCP: not running.")
+            log_error(log_message("not running."))
             return
 
         server = self._server
@@ -105,7 +106,7 @@ class BinjaCodeModeMCP:
                 if backend is not None:
                     backend.wait_for_idle()
             except Exception as e:
-                log_error(f"Code Mode MCP: error while stopping: {e}")
+                log_error(log_message(f"error while stopping: {e}"))
             finally:
                 # Keep both objects reachable until their work is gone. A
                 # timed-out execute request can finish before its script does.

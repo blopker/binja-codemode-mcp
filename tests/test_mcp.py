@@ -24,6 +24,8 @@ class FakeBackend:
         self.targets: list[Any] = []
         self.descriptions: list[Any] = []
         self.read_only: list[bool] = []
+        self.output_directories: list[Any] = []
+        self.output_extensions: list[Any] = []
         self.guide_topics: list[str | None] = []
         self.defined: list[str] = []
         self.removed: list[str] = []
@@ -34,11 +36,15 @@ class FakeBackend:
         target: Any = None,
         description: Any = None,
         read_only: bool = False,
+        output_directory: str | None = None,
+        output_extension: str | None = None,
     ) -> ExecutionResult:
         self.executed.append(code)
         self.targets.append(target)
         self.descriptions.append(description)
         self.read_only.append(read_only)
+        self.output_directories.append(output_directory)
+        self.output_extensions.append(output_extension)
         return self.result
 
     def define_lib_function(self, source: str) -> str:
@@ -173,6 +179,41 @@ class TestTools:
         assert result["isError"] is True
         assert backend.executed == []
 
+    def test_execute_passes_artifact_arguments(self, handler, backend):
+        call(
+            handler,
+            "tools/call",
+            name="execute",
+            arguments={
+                "code": "print(1)",
+                "output_directory": "/tmp/results",
+                "output_extension": "jsonl",
+            },
+        )
+        assert backend.output_directories == ["/tmp/results"]
+        assert backend.output_extensions == ["jsonl"]
+
+    @pytest.mark.parametrize(
+        "arguments",
+        [
+            {"output_directory": "/tmp"},
+            {"output_extension": "txt"},
+            {"output_directory": 1, "output_extension": "txt"},
+            {"output_directory": "/tmp", "output_extension": False},
+        ],
+    )
+    def test_execute_rejects_invalid_artifact_arguments(
+        self, handler, backend, arguments
+    ):
+        result = call(
+            handler,
+            "tools/call",
+            name="execute",
+            arguments={"code": "pass", **arguments},
+        )["result"]
+        assert result["isError"] is True
+        assert backend.executed == []
+
     def test_a_timing_footer_follows_the_output(self, handler):
         """Sizing a batch against the timeout is guesswork without a
         throughput signal — but it must not contaminate what the script
@@ -185,6 +226,17 @@ class TestTools:
         ]["content"][0]["text"]
         assert text.startswith("line one\n")
         assert text.rstrip().endswith("[2.5s of 30s]")
+
+    def test_artifact_metadata_follows_the_preview(self, handler):
+        text = _text(
+            handler,
+            success=True,
+            output="preview\n",
+            artifact_path="/tmp/generated.jsonl",
+            artifact_status="success",
+            artifact_bytes=1234,
+        )
+        assert "Output artifact (success, 1234 bytes): /tmp/generated.jsonl" in text
 
     def test_the_footer_lists_saved_library_functions(self, handler):
         """`h.lib` is invisible otherwise: the model cannot see what it saved
@@ -425,6 +477,8 @@ class TestErrors:
             target: Any = None,
             description: Any = None,
             read_only: bool = False,
+            output_directory: str | None = None,
+            output_extension: str | None = None,
         ) -> ExecutionResult:
             raise RuntimeError("backend died")
 
@@ -551,6 +605,8 @@ class TestResponseBudget:
             target: Any = None,
             description: Any = None,
             read_only: bool = False,
+            output_directory: str | None = None,
+            output_extension: str | None = None,
         ):
             raise RuntimeError("x" * 200_000)
 

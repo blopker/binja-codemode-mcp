@@ -33,6 +33,43 @@ class TestExecute:
         result = backend.execute("print(h.binaries()[0]['id'])")
         assert result.output.strip().startswith("binary-")
 
+    def test_complete_output_can_be_written_to_a_generated_file(
+        self, backend, tmp_path
+    ):
+        result = backend.execute(
+            "print('complete')",
+            output_directory=str(tmp_path),
+            output_extension="txt",
+        )
+        assert result.success
+        assert result.artifact_path is not None
+        assert result.artifact_status == "success"
+        assert "target-binary-1-" in result.artifact_path
+        assert result.artifact_path.endswith(".txt")
+
+    def test_artifact_arguments_must_be_paired(self, backend, tmp_path):
+        result = backend.execute(
+            "print('never')",
+            output_directory=str(tmp_path),
+        )
+        assert not result.success
+        assert "provided together" in (result.error or "")
+        assert not list(tmp_path.glob("binja-*"))
+
+    def test_artifact_directory_and_extension_are_validated(self, backend, tmp_path):
+        relative = backend.execute(
+            "pass",
+            output_directory="relative",
+            output_extension="txt",
+        )
+        unsafe = backend.execute(
+            "pass",
+            output_directory=str(tmp_path),
+            output_extension=".txt",
+        )
+        assert not relative.success and "absolute" in (relative.error or "")
+        assert not unsafe.success and "output_extension" in (unsafe.error or "")
+
     def test_no_binary_open_is_a_clean_error(self, config):
         backend = PluginBackend(config, tabs_provider=list)
         result = backend.execute("print(1)")

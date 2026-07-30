@@ -67,5 +67,5 @@ driver: ## Run the live driver plan in a fresh Claude session
 
 clean: ## Remove caches
 	@find . -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null || true
-	@rm -rf .pytest_cache .ruff_cache
+	@rm -rf .pytest_cache .ruff_cache test-output
 	@echo "Cleaned."
