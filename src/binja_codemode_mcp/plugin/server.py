@@ -61,6 +61,17 @@ class _Handler(BaseHTTPRequestHandler):
         pass  # Binary Ninja's log is the place for this, not stderr
 
     def do_POST(self) -> None:
+        server: Any = self.server
+        if not server.begin_request():
+            self.close_connection = True
+            self._send(503, {"error": "MCP server is shutting down."})
+            return
+        try:
+            self._do_POST()
+        finally:
+            server.end_request()
+
+    def _do_POST(self) -> None:
         # Every rejection below has to consume the request body first. On a
         # keep-alive connection an undrained body is read as the start of the
         # next request, so the client's following call gets a nonsense reply —
@@ -250,6 +261,36 @@ def _invalid_request(message: str) -> dict[str, Any]:
 class _Server(ThreadingHTTPServer):
     daemon_threads = True
 
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._requests_idle = threading.Event()
+        self._requests_idle.set()
+        self._requests_lock = threading.Lock()
+        self._active_requests = 0
+        self._stopping = False
+
+    def begin_request(self) -> bool:
+        """Reserve the backend before shutdown can observe it as idle."""
+        with self._requests_lock:
+            if self._stopping:
+                return False
+            self._active_requests += 1
+            self._requests_idle.clear()
+            return True
+
+    def end_request(self) -> None:
+        with self._requests_lock:
+            self._active_requests -= 1
+            if self._active_requests == 0:
+                self._requests_idle.set()
+
+    def begin_shutdown(self) -> None:
+        with self._requests_lock:
+            self._stopping = True
+
+    def wait_for_requests(self) -> None:
+        self._requests_idle.wait()
+
     def handle_error(self, request: Any, client_address: Any) -> None:
         """A client hanging up is normal; do not print a traceback for it.
 
@@ -273,8 +314,11 @@ class MCPHTTPServer:
         self.api_key = api_key
         self._server: _Server | None = None
         self._thread: threading.Thread | None = None
+        self._stop_lock = threading.Lock()
 
     def start(self) -> str:
+        if self._server is not None:
+            raise RuntimeError("MCP server is already running")
         handler = type(
             "BoundHandler", (_Handler,), {"mcp": self.mcp, "api_key": self.api_key}
         )
@@ -294,11 +338,23 @@ class MCPHTTPServer:
         return f"http://{self.host}:{self.port}/mcp"
 
     def stop(self) -> None:
-        if self._server is not None:
-            self._server.shutdown()
-            self._server.server_close()
-        self._server = None
-        self._thread = None
+        """Stop accepting requests, then wait for every accepted request."""
+        with self._stop_lock:
+            server = self._server
+            thread = self._thread
+            if server is None:
+                return
+            # Existing keep-alive sockets can try another request after the
+            # listener closes. Mark first so they are refused rather than
+            # reaching a backend the plugin is about to discard.
+            server.begin_shutdown()
+            server.shutdown()
+            server.server_close()
+            server.wait_for_requests()
+            if thread is not None and thread is not threading.current_thread():
+                thread.join()
+            self._server = None
+            self._thread = None
 
     @property
     def running(self) -> bool:

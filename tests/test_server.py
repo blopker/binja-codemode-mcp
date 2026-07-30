@@ -7,6 +7,7 @@ a mocked handler would hide.
 import json
 import socket
 import struct
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -351,13 +352,59 @@ class TestLifecycle:
             server.stop()
 
     def test_stop_returns_promptly(self):
-        """stop() is reachable from the status-bar button on the Qt main
-        thread, so it must not stall the UI waiting for the poll loop."""
+        """With nothing active, draining adds no noticeable delay."""
         server = MCPHTTPServer(EchoHandler(), host="127.0.0.1", port=0, api_key=API_KEY)
         server.start()
         started = time.monotonic()
         server.stop()
         assert time.monotonic() - started < 0.2
+        assert not server.running
+
+    def test_idle_keep_alive_connection_does_not_delay_stop(self):
+        server = MCPHTTPServer(EchoHandler(), host="127.0.0.1", port=0, api_key=API_KEY)
+        url = server.start()
+        body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "ping"}).encode()
+        with TestKeepAlive._sock(url) as sk:
+            sk.sendall(TestKeepAlive._request("/mcp", body))
+            assert b"200" in TestKeepAlive._read_response(sk).split(b"\r\n")[0]
+
+            started = time.monotonic()
+            server.stop()
+            assert time.monotonic() - started < 0.2
+
+    def test_stop_waits_for_an_accepted_request(self):
+        """Restarting before an old handler exits would give it a new executor
+        lock and allow overlapping database transactions."""
+        entered = threading.Event()
+        release = threading.Event()
+
+        class BlockingHandler:
+            def handle(self, message):
+                entered.set()
+                release.wait()
+                return {"jsonrpc": "2.0", "id": message["id"], "result": {}}
+
+        server = MCPHTTPServer(
+            BlockingHandler(), host="127.0.0.1", port=0, api_key=API_KEY
+        )
+        url = server.start()
+        request = threading.Thread(
+            target=lambda: post(url, {"jsonrpc": "2.0", "id": 1})
+        )
+        request.start()
+        assert entered.wait(1)
+
+        stopping = threading.Thread(target=server.stop)
+        stopping.start()
+        time.sleep(0.05)
+        assert stopping.is_alive(), "stop returned while a handler was active"
+        assert server.running
+
+        release.set()
+        stopping.join(1)
+        request.join(1)
+        assert not stopping.is_alive()
+        assert not request.is_alive()
         assert not server.running
 
 

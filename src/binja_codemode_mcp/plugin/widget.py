@@ -28,7 +28,7 @@ _ui_notification = None
 _plugin_instance = None
 
 
-def _get_status_text(running: bool, script=None) -> str:
+def _get_status_text(running: bool, script=None, *, shutting_down: bool = False) -> str:
     """The label, with a warning while a script holds the database.
 
     A failed script reverts the database to where its transaction opened, which
@@ -36,6 +36,8 @@ def _get_status_text(running: bool, script=None) -> str:
     that — Binary Ninja has no per-thread undo scoping — so the one mitigation
     is telling them, at the moment it matters, that now is not the time to type.
     """
+    if shutting_down:
+        return "🟡 MCP: Shutting down..."
     if script is not None:
         _target, elapsed = script
         return f"⚠️ MCP: running script {elapsed:.0f}s. Do not edit"
@@ -44,7 +46,9 @@ def _get_status_text(running: bool, script=None) -> str:
     return "🔴 MCP: Stopped"
 
 
-def _get_status_tooltip(script=None) -> str:
+def _get_status_tooltip(script=None, *, shutting_down: bool = False) -> str:
+    if shutting_down:
+        return "Waiting for active MCP work to finish before stopping"
     if script is None:
         return "Click to start/stop MCP server"
     target, _elapsed = script
@@ -94,6 +98,8 @@ def _on_button_click():
         return
 
     try:
+        if _plugin_instance.is_shutting_down:
+            return
         # No BinaryView needed either way: the server resolves its target per
         # request and is meant to be startable with nothing open.
         if _plugin_instance.is_running:
@@ -111,10 +117,14 @@ def _update_status_indicator():
     if _status_button is None or _plugin_instance is None:
         return
 
+    shutting_down = _plugin_instance.is_shutting_down
     running = _plugin_instance.is_running
     script = _plugin_instance.running_script if running else None
-    _status_button.setText(_get_status_text(running, script))
-    _status_button.setToolTip(_get_status_tooltip(script))
+    _status_button.setText(
+        _get_status_text(running, script, shutting_down=shutting_down)
+    )
+    _status_button.setToolTip(_get_status_tooltip(script, shutting_down=shutting_down))
+    _status_button.setEnabled(not shutting_down)
 
 
 def _ensure_indicator_in_status_bar():
@@ -219,7 +229,7 @@ def init_status_indicator(plugin_instance):
     log_debug("MCP Status: Status indicator initialized")
 
 
-def update_status(running: bool):
+def update_status(running: bool, *, shutting_down: bool = False):
     """Update the status indicator.
 
     Args:
@@ -229,7 +239,12 @@ def update_status(running: bool):
     if button is None:
         return
 
-    execute_on_main_thread(lambda: button.setText(_get_status_text(running)))
+    def apply() -> None:
+        button.setText(_get_status_text(running, shutting_down=shutting_down))
+        button.setToolTip(_get_status_tooltip(shutting_down=shutting_down))
+        button.setEnabled(not shutting_down)
+
+    execute_on_main_thread(apply)
 
 
 def cleanup_status_indicator():

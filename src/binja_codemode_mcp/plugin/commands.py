@@ -1,5 +1,7 @@
 """Plugin lifecycle and Binary Ninja command registration."""
 
+import threading
+
 import binaryninja
 from binaryninja import PluginCommand
 from binaryninja.log import log_error, log_info
@@ -23,10 +25,15 @@ class BinjaCodeModeMCP:
         self._config: Config | None = None
         self._server: MCPHTTPServer | None = None
         self._backend: PluginBackend | None = None
+        self._shutdown_thread: threading.Thread | None = None
 
     @property
     def is_running(self) -> bool:
         return self._server is not None and self._server.running
+
+    @property
+    def is_shutting_down(self) -> bool:
+        return self._shutdown_thread is not None
 
     @property
     def running_script(self) -> tuple[str | None, float] | None:
@@ -38,6 +45,9 @@ class BinjaCodeModeMCP:
             return None
 
     def start_server(self, bv: object = None) -> None:
+        if self.is_shutting_down:
+            log_error("Code Mode MCP: still shutting down.")
+            return
         if self.is_running:
             log_error("Code Mode MCP: already running.")
             return
@@ -79,19 +89,42 @@ class BinjaCodeModeMCP:
         update_status(True)
 
     def stop_server(self, bv: object = None) -> None:
+        if self.is_shutting_down:
+            log_error("Code Mode MCP: already shutting down.")
+            return
         if self._server is None:
             log_error("Code Mode MCP: not running.")
             return
-        try:
-            self._server.stop()
-        except Exception as e:
-            log_error(f"Code Mode MCP: error while stopping: {e}")
-        finally:
-            self._server = None
-            self._backend = None
-            self._config = None
-            log_info("Code Mode MCP server stopped.")
-            update_status(False)
+
+        server = self._server
+        backend = self._backend
+
+        def finish() -> None:
+            try:
+                server.stop()
+                if backend is not None:
+                    backend.wait_for_idle()
+            except Exception as e:
+                log_error(f"Code Mode MCP: error while stopping: {e}")
+            finally:
+                # Keep both objects reachable until their work is gone. A
+                # timed-out execute request can finish before its script does.
+                if self._server is server:
+                    self._server = None
+                    self._backend = None
+                    self._config = None
+                self._shutdown_thread = None
+                log_info("Code Mode MCP server stopped.")
+                update_status(False)
+
+        self._shutdown_thread = threading.Thread(
+            target=finish,
+            daemon=True,
+            name="binja-mcp-shutdown",
+        )
+        log_info("Code Mode MCP server shutting down.")
+        update_status(True, shutting_down=True)
+        self._shutdown_thread.start()
 
     def show_status(self, bv: object = None) -> None:
         if self._config is None or self._backend is None:

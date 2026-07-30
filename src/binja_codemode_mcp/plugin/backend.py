@@ -580,6 +580,10 @@ class PluginBackend:
         """A script in flight, for the status indicator to warn about."""
         return self.executor.running_script()
 
+    def wait_for_idle(self) -> None:
+        """Wait for execution that may have outlived its timed-out request."""
+        self.executor.wait_for_idle()
+
     def guide(self, topic: str | None) -> str:
         return render(self.status(), topic)
 
