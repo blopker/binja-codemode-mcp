@@ -16,7 +16,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from .session import _same_view
+from .session import same_view
 
 # Scripts are compiled under a unique pseudo-filename per call, and their text
 # is registered where linecache can find it. That buys two things: tracebacks
@@ -276,7 +276,7 @@ class Batch:
         interleaving the executor lock exists to prevent.
         """
         with self._lock:
-            return any(_same_view(h.view, view) for h in self._held)
+            return any(same_view(h.view, view) for h in self._held)
 
     def settle(self, revert: bool) -> tuple[bool, str | None]:
         """Close every open state. Returns (anything reverted, first failure).

@@ -20,7 +20,7 @@ from typing import Any
 RAW_VIEW = "Raw"
 
 
-def _same_view(a: Any, b: Any) -> bool:
+def same_view(a: Any, b: Any) -> bool:
     """Compare BinaryViews by value, never by `is`.
 
     Binary Ninja hands back a fresh Python wrapper around the same core handle

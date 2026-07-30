@@ -27,7 +27,7 @@ from .executor import (
     publish_source,
 )
 from .guide import render
-from .session import BinarySession, BinaryTab, _same_view
+from .session import BinarySession, BinaryTab, same_view
 
 # Supplied fresh on every call, so a saved function must never carry the
 # defining call's copies of these.
@@ -373,7 +373,7 @@ class Helpers:
         # By view, not by display name: two tabs can share a name — the same
         # build opened twice, or a file reopened beside itself — and guarding on
         # the name would refuse a legitimate read of the other one.
-        if self._target is not None and _same_view(tab.bv, self._target.bv):
+        if self._target is not None and same_view(tab.bv, self._target.bv):
             raise ValueError(
                 f"{tab.name!r} is this call's target — use `bv` to write to it. "
                 "h.read_only_view is for the other binary."
