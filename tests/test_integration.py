@@ -16,6 +16,11 @@ from binja_codemode_mcp.plugin.mcp import MCPHandler
 from binja_codemode_mcp.plugin.server import MCPHTTPServer
 
 KEY = "integration-key"
+INITIALIZE = {
+    "protocolVersion": "2025-06-18",
+    "capabilities": {},
+    "clientInfo": {"name": "integration-test", "version": "1"},
+}
 
 
 @pytest.fixture
@@ -56,13 +61,13 @@ def text_of(response):
 
 def test_handshake_delivers_guidance(client):
     """A client sees the instructions at initialize, without having to ask."""
-    result = client("initialize")["result"]
+    result = client("initialize", **INITIALIZE)["result"]
     assert result["serverInfo"]["name"] == "binja-codemode-mcp"
     assert "real Binary Ninja API" in result["instructions"].replace("REAL", "real")
 
 
 def test_full_session(client, bv):
-    client("initialize")
+    client("initialize", **INITIALIZE)
 
     tools = [t["name"] for t in client("tools/list")["result"]["tools"]]
     assert tools == [
@@ -117,7 +122,7 @@ def test_full_session(client, bv):
 
 
 def test_failed_script_reverts_and_reports(client, bv):
-    client("initialize")
+    client("initialize", **INITIALIZE)
     response = client(
         "tools/call",
         name="execute",
@@ -129,7 +134,7 @@ def test_failed_script_reverts_and_reports(client, bv):
 
 
 def test_status_resource_reflects_the_live_session(client):
-    client("initialize")
+    client("initialize", **INITIALIZE)
     response = client("resources/read", uri="binja://status")
     status = json.loads(response["result"]["contents"][0]["text"])
     assert status["binaries"][0]["name"] == "target"
@@ -141,7 +146,7 @@ def test_a_failing_script_with_an_enormous_message_stays_usable(client):
     response limited only by RAM."""
     from binja_codemode_mcp.plugin.mcp import MAX_RESULT_BYTES
 
-    client("initialize")
+    client("initialize", **INITIALIZE)
     response = client(
         "tools/call",
         name="execute",

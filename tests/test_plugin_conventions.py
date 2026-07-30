@@ -11,6 +11,8 @@ import pytest
 # tomllib is 3.11+; the project pins 3.10 to match Binary Ninja's interpreter.
 import tomli
 
+from binja_codemode_mcp.version import VERSION
+
 ROOT = Path(__file__).resolve().parent.parent
 PACKAGE = ROOT / "src" / "binja_codemode_mcp"
 
@@ -102,7 +104,7 @@ class TestPackaging:
         for field in ("name", "type", "api", "description", "license", "version"):
             assert field in metadata, field
         assert metadata["api"] == ["python3"]
-        assert metadata["version"] == project["project"]["version"]
+        assert metadata["version"] == project["project"]["version"] == VERSION
 
     def test_no_runtime_dependencies(self):
         """There is no requirements.txt, so the plugin must need nothing beyond

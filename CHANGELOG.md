@@ -18,10 +18,19 @@ A rewrite.
   single ⌘Z.
 - **Only the first opened binary was reachable.** The server captured a `BinaryView` at
   start and never updated it, so a second tab was invisible and edits could land on a
-  stale view. The target is now resolved per request and pinned per session.
+  stale view. The target is now resolved independently for every request.
 - **Scripts could not use their own top-level names.** `exec(code, globals, {})` meant
   nested functions and comprehensions raised `NameError`.
 - **`print()` output was prefixed with a timestamp**, corrupting output the model parses.
+- Accidental infinite Python loops and recursion now stop cooperatively at inserted
+  checkpoints. Timeout checks cannot interrupt transaction bookkeeping.
+- Read-only secondary views always roll back, including mutations Binary Ninja does not
+  report through notifications.
+- Server shutdown drains accepted requests and lingering execution before allowing a
+  restart, preventing overlapping executors.
+- Large `print()` calls are clipped before the output collector retains or encodes them.
+- Malformed JSON-RPC requests and unsupported MCP protocol-version headers are rejected
+  with protocol errors instead of reaching backend code.
 - Checkpoint/rollback could revert the *user's* manual edits: it counted undo actions and
   called `bv.undo()` that many times. Removed — transactions replace it.
 - The server no longer stops itself when the last file closes, which used to yank the
@@ -58,11 +67,9 @@ A rewrite.
 
 ### Added
 
-- **`h.lib`, a per-session library.** `h.lib["name"] = fn` keeps a function for the rest of
-  the server session; `h.lib.name()` re-runs it against whatever is selected now. It stores
-  functions rather than values, so nothing held can go stale. `print(h.lib)` lists what is
-  saved, `h.lib.name.source` returns its text, `h.lib_sources()` returns all of them, and
-  `del h.lib.name` removes one. Calls remain stateless in every other respect.
+- **`h.lib`, a per-session function library.** Define, inspect, and remove self-contained
+  functions with dedicated MCP tools, then call them from `execute` as `h.lib.name()`.
+  The namespace is read-only inside scripts and resolves library dependencies dynamically.
 - **Every response is bounded.** One tool result is capped at 40 KB, with the error section
   reserved inside it, so a script that raises with an enormous message comes back readable
   instead of unbounded. Output keeps its head, a traceback keeps its tail *and* its first
@@ -71,16 +78,12 @@ A rewrite.
   30s]`) gives the throughput signal needed to size a batch against the 30-second limit.
 - **Tracebacks quote the line that raised**, rather than giving a line number into code the
   model has to remember.
-- **A closed target is announced rather than silently replaced.** When the pinned binary is
-  closed, the guide header says so and the next `execute` is refused once, so a script
-  cannot write to a database nobody chose.
-- **Status is reported in a dialog**, not only the log pane, and the server can be started
-  from the status bar with no file open.
-- pytest, ruff, and [ty](https://github.com/astral-sh/ty), with 222 tests covering the
-  protocol, transport, execution contract, binary selection, library, and guide assembly,
-  plus end-to-end tests over a real socket. Python pinned to 3.10 to match Binary Ninja's
-  bundled interpreter. `tests/driver_plan.md` covers what the suite cannot reach — undo
-  behaviour, tab handling, and persistence — by having a model drive a live session.
+- **Status-bar controls** start and stop the server with no file open, warn while scripts
+  hold a database, and show draining shutdown.
+- pytest, Ruff, and [ty](https://github.com/astral-sh/ty) cover the protocol, transport,
+  execution contract, binary selection, library, guide assembly, and real-socket
+  integration. Python is pinned to 3.10 for Binary Ninja. `tests/driver_plan.md` covers
+  live undo behaviour, tab handling, persistence, and UI feedback.
 
 ## [0.1.3] - 2026-01-08
 

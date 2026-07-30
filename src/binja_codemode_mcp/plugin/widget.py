@@ -9,7 +9,7 @@ dependency behind a try/except that leaves every name possibly-unbound.
 
 import contextlib
 
-from binaryninja import execute_on_main_thread
+from binaryninja import execute_on_main_thread, execute_on_main_thread_and_wait
 from binaryninja.log import log_debug, log_error
 
 # binaryninjaui MUST be imported before PySide6: it selects the PySide6 build
@@ -200,6 +200,11 @@ class MCPUINotification(UIContextNotification):
 
 
 def init_status_indicator(plugin_instance):
+    """Initialize or replace the indicator on Qt's main thread."""
+    execute_on_main_thread_and_wait(lambda: _init_status_indicator(plugin_instance))
+
+
+def _init_status_indicator(plugin_instance):
     """Initialize the status indicator system.
 
     Args:
@@ -211,7 +216,7 @@ def init_status_indicator(plugin_instance):
     # first: rebinding the global would drop the last reference to a
     # notification the C++ side still holds a pointer to, and the next tab
     # switch would call into freed memory.
-    cleanup_status_indicator()
+    _cleanup_status_indicator()
 
     _plugin_instance = plugin_instance
 
@@ -248,11 +253,18 @@ def update_status(running: bool, *, shutting_down: bool = False):
 
 
 def cleanup_status_indicator():
+    """Remove the indicator on Qt's main thread."""
+    execute_on_main_thread_and_wait(_cleanup_status_indicator)
+
+
+def _cleanup_status_indicator():
     """Clean up the status indicator resources."""
     global _indicator_timer, _ui_notification, _status_button, _status_container
+    global _plugin_instance
 
     if _indicator_timer is not None:
         _indicator_timer.stop()
+        _indicator_timer.deleteLater()
         _indicator_timer = None
 
     if _ui_notification is not None:
@@ -260,5 +272,14 @@ def cleanup_status_indicator():
             UIContext.unregisterNotification(_ui_notification)
         _ui_notification = None
 
+    if _status_container is not None:
+        with contextlib.suppress(RuntimeError):
+            parent = _status_container.parent()
+            remove = getattr(parent, "removeWidget", None)
+            if callable(remove):
+                remove(_status_container)
+            _status_container.deleteLater()
+
     _status_button = None
     _status_container = None
+    _plugin_instance = None

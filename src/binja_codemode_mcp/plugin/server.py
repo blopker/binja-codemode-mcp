@@ -14,6 +14,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import urlparse
 
+from .mcp import PROTOCOL_VERSION
+
 MAX_BODY_BYTES = 8 * 1024 * 1024
 
 # The MCP layer budgets every text field it assembles; this is the backstop for
@@ -85,6 +87,15 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if not self._authorized():
             self._reject(401, {"error": "Unauthorized."})
+            return
+        requested_version = self.headers.get("MCP-Protocol-Version")
+        if requested_version is not None and requested_version != PROTOCOL_VERSION:
+            self._reject(
+                400,
+                _invalid_request(
+                    f"Unsupported MCP-Protocol-Version: {requested_version!r}."
+                ),
+            )
             return
 
         # No chunked support: the body length has to be known up front for the

@@ -7,6 +7,8 @@ without Binary Ninja or a socket.
 import json
 from typing import Any, Protocol
 
+from ..version import VERSION
+
 # Every text field that leaves this process converges here, which is the last
 # layer that knows what each string means: this one is print output and should
 # keep its head, that one a traceback and should keep its tail. server.py cannot
@@ -19,7 +21,8 @@ MAX_FOOTER_LIB_BYTES = 200  # the h.lib name list inside the footer
 
 PROTOCOL_VERSION = "2025-06-18"
 SERVER_NAME = "binja-codemode-mcp"
-SERVER_VERSION = "0.2.0"
+SERVER_VERSION = VERSION
+_MISSING = object()
 
 # Loaded at session start. Keep only orientation and safety rules that must be
 # visible before the first tool call.
@@ -84,17 +87,13 @@ class MCPHandler:
 
     def handle(self, message: dict[str, Any]) -> dict[str, Any] | None:
         method = message.get("method")
-        msg_id = message.get("id")
-        params = message.get("params") or {}
+        raw_id = message.get("id", _MISSING)
+        msg_id = raw_id if _valid_id(raw_id) else None
+        raw_params = message.get("params", _MISSING)
+        params = {} if raw_params is _MISSING else raw_params
 
-        # Notifications carry no id and take no response.
-        if msg_id is None:
-            return None
-
-        # Shape checks before dispatch. Without them a structured `method` or
-        # positional `params` — both legal JSON, and positional params are legal
-        # JSON-RPC — reached `.get()` and came back as an internal error with a
-        # Python exception in it, rather than as the protocol error they are.
+        if message.get("jsonrpc") != "2.0":
+            return _error(msg_id, -32600, "Invalid Request: jsonrpc must be '2.0'.")
         if not isinstance(method, str):
             return _error(
                 msg_id,
@@ -109,6 +108,18 @@ class MCPHandler:
                 "Invalid params: expected an object, got "
                 f"{type(params).__name__}. This server takes named parameters only.",
             )
+        if raw_id is not _MISSING and not _valid_id(raw_id):
+            return _error(
+                None,
+                -32600,
+                "Invalid Request: id must be a string or integer and cannot be null.",
+            )
+
+        # Valid notifications carry no id and never receive a response. MCP
+        # defines specific notification methods; none invoke this server's
+        # tools, so there is no work to dispatch here.
+        if raw_id is _MISSING:
+            return None
 
         try:
             result = self._dispatch(method, params)
@@ -121,7 +132,7 @@ class MCPHandler:
 
     def _dispatch(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         if method == "initialize":
-            return self._initialize()
+            return self._initialize(params)
         if method == "ping":
             return {}
         if method == "tools/list":
@@ -137,11 +148,27 @@ class MCPHandler:
             return {key: []}
         raise MCPError(-32601, f"Method not found: {method}")
 
-    def _initialize(self) -> dict[str, Any]:
+    def _initialize(self, params: dict[str, Any]) -> dict[str, Any]:
+        version = params.get("protocolVersion")
+        capabilities = params.get("capabilities")
+        client = params.get("clientInfo")
+        if not isinstance(version, str) or not version:
+            raise MCPError(-32602, "Invalid params: protocolVersion is required.")
+        if not isinstance(capabilities, dict):
+            raise MCPError(-32602, "Invalid params: capabilities must be an object.")
+        if not isinstance(client, dict):
+            raise MCPError(-32602, "Invalid params: clientInfo must be an object.")
+        if not isinstance(client.get("name"), str) or not isinstance(
+            client.get("version"), str
+        ):
+            raise MCPError(
+                -32602,
+                "Invalid params: clientInfo requires string name and version fields.",
+            )
         return {
             "protocolVersion": PROTOCOL_VERSION,
             "capabilities": {
-                "tools": {"listChanged": True},
+                "tools": {"listChanged": False},
                 "resources": {},
             },
             "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
@@ -228,7 +255,12 @@ class MCPHandler:
 
     def _call_tool(self, params: dict[str, Any]) -> dict[str, Any]:
         name = params.get("name")
-        args = params.get("arguments") or {}
+        raw_args = params.get("arguments", _MISSING)
+        args = {} if raw_args is _MISSING else raw_args
+        if not isinstance(name, str) or not name:
+            raise MCPError(-32602, "Invalid params: tool name is required.")
+        if not isinstance(args, dict):
+            raise MCPError(-32602, "Invalid params: arguments must be an object.")
 
         if name == "execute":
             code = args.get("code")
@@ -238,9 +270,9 @@ class MCPHandler:
             if target is not None and not isinstance(target, str):
                 return _tool_error("`target` must be the name of an open binary.")
             note = args.get("description")
-            result = self.backend.execute(
-                code, target, note if isinstance(note, str) else None
-            )
+            if note is not None and not isinstance(note, str):
+                return _tool_error("`description` must be a string.")
+            result = self.backend.execute(code, target, note)
 
             # Reserve the footer and the error out of the budget first, then
             # give the rest to output. The footer is concatenated after the
@@ -270,7 +302,9 @@ class MCPHandler:
 
         if name == "binja_guide":
             topic = args.get("topic")
-            text = self.backend.guide(topic if isinstance(topic, str) else None)
+            if topic is not None and not isinstance(topic, str):
+                return _tool_error("`topic` must be a string.")
+            text = self.backend.guide(topic)
             return _tool_text(text, MAX_RESULT_BYTES, is_error=False)
 
         if name == "define_lib_function":
@@ -322,6 +356,8 @@ class MCPHandler:
 
     def _read_resource(self, params: dict[str, Any]) -> dict[str, Any]:
         uri = params.get("uri")
+        if not isinstance(uri, str):
+            raise MCPError(-32602, "Invalid params: uri is required.")
         if uri == "binja://guide":
             return _contents(uri, self.backend.guide(None), "text/markdown")
         if uri == "binja://status":
@@ -442,3 +478,10 @@ def _error(msg_id: Any, code: int, message: str) -> dict[str, Any]:
         "id": msg_id,
         "error": {"code": code, "message": _clip_head(message, MAX_MESSAGE_BYTES)},
     }
+
+
+def _valid_id(value: Any) -> bool:
+    """MCP request IDs are strings or integers, never null or booleans."""
+    return isinstance(value, str) or (
+        isinstance(value, int) and not isinstance(value, bool)
+    )

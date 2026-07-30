@@ -72,18 +72,45 @@ def call(handler: MCPHandler, method: str, **params: Any) -> dict[str, Any]:
     return response
 
 
+def initialize(handler: MCPHandler, **overrides: Any) -> dict[str, Any]:
+    params = {
+        "protocolVersion": "2025-06-18",
+        "capabilities": {},
+        "clientInfo": {"name": "test", "version": "1"},
+    }
+    params.update(overrides)
+    return call(handler, "initialize", **params)
+
+
 class TestInitialize:
     def test_advertises_tools_and_resources(self, handler):
-        result = call(handler, "initialize")["result"]
-        assert result["capabilities"]["tools"]["listChanged"] is True
+        result = initialize(handler)["result"]
+        assert result["capabilities"]["tools"]["listChanged"] is False
         assert "resources" in result["capabilities"]
 
     def test_guidance_uses_the_real_instructions_field(self, handler):
         """Guidance must ride the spec field clients actually read; anywhere
         else it never reaches the model."""
-        result = call(handler, "initialize")["result"]
+        result = initialize(handler)["result"]
         assert result["instructions"] == INSTRUCTIONS
         assert "binja_guide" in result["instructions"]
+
+    @pytest.mark.parametrize(
+        "params",
+        [
+            {},
+            {"protocolVersion": "2025-06-18"},
+            {"protocolVersion": "2025-06-18", "capabilities": {}},
+            {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "test"},
+            },
+        ],
+    )
+    def test_requires_the_lifecycle_fields(self, handler, params):
+        response = call(handler, "initialize", **params)
+        assert response["error"]["code"] == -32602
 
     def test_instructions_fit_the_client_truncation_limit(self):
         """Claude Code truncates server instructions at 2 KB."""
@@ -324,6 +351,35 @@ class TestMalformedRequests:
         )
         assert response["error"]["code"] == -32602
         assert "AttributeError" not in response["error"]["message"]
+
+    @pytest.mark.parametrize("params", [[], "", 0, False, None])
+    def test_falsey_non_object_params_are_not_treated_as_absent(self, handler, params):
+        response = handler.handle(
+            {"jsonrpc": "2.0", "id": 1, "method": "ping", "params": params}
+        )
+        assert response["error"]["code"] == -32602
+
+    @pytest.mark.parametrize("arguments", [[], "", 0, False, None])
+    def test_tool_arguments_must_be_an_object(self, handler, arguments):
+        response = call(handler, "tools/call", name="execute", arguments=arguments)
+        assert response["error"]["code"] == -32602
+        assert "AttributeError" not in response["error"]["message"]
+
+    def test_jsonrpc_version_is_required(self, handler):
+        response = handler.handle({"id": 1, "method": "ping"})
+        assert response["error"]["code"] == -32600
+
+    @pytest.mark.parametrize("msg_id", [None, True, False, 1.5, [], {}])
+    def test_request_id_must_be_a_string_or_integer(self, handler, msg_id):
+        response = handler.handle({"jsonrpc": "2.0", "id": msg_id, "method": "ping"})
+        assert response["error"]["code"] == -32600
+        assert response["id"] is None
+
+    @pytest.mark.parametrize("msg_id", ["request-1", 0, -2])
+    def test_valid_request_ids_are_echoed(self, handler, msg_id):
+        response = handler.handle({"jsonrpc": "2.0", "id": msg_id, "method": "ping"})
+        assert response["id"] == msg_id
+        assert response["result"] == {}
 
     def test_a_structured_method_is_an_invalid_request(self, handler):
         response = handler.handle({"jsonrpc": "2.0", "id": 1, "method": {"a": 1}})

@@ -14,6 +14,7 @@ import urllib.request
 
 import pytest
 
+from binja_codemode_mcp.plugin.mcp import PROTOCOL_VERSION
 from binja_codemode_mcp.plugin.server import (
     MAX_BODY_BYTES,
     MAX_RESPONSE_BYTES,
@@ -49,6 +50,7 @@ def post(
     origin: str | None = None,
     method: str = "POST",
     raw: bytes | None = None,
+    protocol_version: str | None = None,
 ) -> tuple[int, bytes]:
     data = raw if raw is not None else json.dumps(body or {}).encode()
     request = urllib.request.Request(url, data=data, method=method)
@@ -56,6 +58,8 @@ def post(
         request.add_header("Authorization", f"Bearer {key}")
     if origin:
         request.add_header("Origin", origin)
+    if protocol_version is not None:
+        request.add_header("MCP-Protocol-Version", protocol_version)
     request.add_header("Content-Type", "application/json")
     try:
         with urllib.request.urlopen(request, timeout=5) as response:
@@ -124,6 +128,23 @@ class TestRequests:
     def test_wrong_path_is_404(self, endpoint):
         status, _ = post(endpoint.replace("/mcp", "/execute"), {"id": 1})
         assert status == 404
+
+    def test_supported_protocol_version_is_accepted(self, endpoint):
+        status, _ = post(
+            endpoint,
+            {"jsonrpc": "2.0", "id": 1, "method": "ping"},
+            protocol_version=PROTOCOL_VERSION,
+        )
+        assert status == 200
+
+    def test_unsupported_protocol_version_is_http_400(self, endpoint):
+        status, body = post(
+            endpoint,
+            {"jsonrpc": "2.0", "id": 1, "method": "ping"},
+            protocol_version="2099-01-01",
+        )
+        assert status == 400
+        assert json.loads(body)["error"]["code"] == -32600
 
 
 class TestKeepAlive:

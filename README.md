@@ -147,16 +147,9 @@ bundle.
 
 ### Reloading
 
-Because installation uses a symlink, edits are immediately visible on disk, but Python
-keeps imported modules in memory. In Binary Ninja's console:
-
-```python
-import binja_codemode_mcp, importlib
-importlib.reload(binja_codemode_mcp)
-```
-
-Stop the server before reloading and start it again afterward. Restart Binary Ninja if
-behavior still appears stale.
+Because installation uses a symlink, edits are immediately visible on disk, but Binary
+Ninja keeps plugin modules in memory. Stop the server and restart Binary Ninja to load
+changes; reloading only the package leaves its imported submodules stale.
 
 ### Testing
 

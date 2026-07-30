@@ -16,9 +16,7 @@ DEFAULT_API_KEY = "binja-codemode-local"
 def default_data_dir() -> Path:
     """Resolve Binary Ninja's user directory.
 
-    Ask Binary Ninja rather than guessing per-platform; it knows where its own
-    user folder is, which differs between installs (this machine uses
-    ~/.binaryninja, not ~/Library/Application Support).
+    Ask Binary Ninja rather than guessing a platform- or install-specific path.
     """
     try:
         import binaryninja
