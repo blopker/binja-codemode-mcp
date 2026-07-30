@@ -70,8 +70,8 @@ class TestHeader:
 class TestSections:
     def test_guide_splits_into_named_sections(self):
         found = topics(GUIDE_PATH.read_text())
-        assert "Ground rules" in found
-        assert "Types" in found
+        assert "Safety" in found
+        assert "Types and data" in found
         assert "Functions" in found
 
     def test_preamble_is_kept_under_the_empty_key(self):
@@ -84,49 +84,28 @@ class TestRender:
     def test_full_guide_includes_header_and_body(self):
         out = render(FULL_STATUS)
         assert "1,284 functions" in out
-        assert "## Ground rules" in out
+        assert "## Safety" in out
 
     def test_topic_returns_one_section_with_the_header(self):
-        out = render(FULL_STATUS, topic="Types")
+        out = render(FULL_STATUS, topic="Types and data")
         assert "1,284 functions" in out
-        assert "## Types" in out
-        assert "## Comments" not in out
+        assert "## Types and data" in out
+        assert "## Functions" not in out
 
     def test_topic_lookup_is_case_insensitive(self):
-        assert "## Types" in render(FULL_STATUS, topic="types")
+        assert "## Types and data" in render(FULL_STATUS, topic="types AND DATA")
 
     def test_unknown_topic_lists_the_real_ones(self):
         out = render(FULL_STATUS, topic="nonsense")
         assert "No section named" in out
-        assert "'Types'" in out
+        assert "'Types and data'" in out
 
 
 class TestGuideSize:
-    """The guide is returned as a single tool result, so it has to fit in one
-    — with room for the generated header. It has grown steadily."""
-
-    def test_the_rendered_guide_fits_in_one_tool_result(self):
-        """With headroom, deliberately. At the hard limit the failure mode is a
-        silently truncated guide — the model gets one missing its end and has no
-        way to tell. Failing early leaves room to notice and decide."""
-        from binja_codemode_mcp.plugin.mcp import MAX_RESULT_BYTES
-
+    def test_the_rendered_guide_stays_concise(self):
+        """The guide is injected into model context, so growth is a product cost."""
         rendered = len(render(FULL_STATUS).encode())
-        assert rendered < MAX_RESULT_BYTES * 0.85, (
-            f"the rendered guide is {rendered} bytes of {MAX_RESULT_BYTES}; "
-            "split a section out, trim one, or raise MAX_RESULT_BYTES deliberately"
-        )
-
-    def test_the_headroom_is_real_not_decorative(self):
-        """A margin nobody checks is a margin that gets raised the first time
-        it fails. 27 KB of 40 KB is already past two thirds."""
-        from binja_codemode_mcp.plugin.mcp import MAX_RESULT_BYTES
-
-        rendered = len(render(FULL_STATUS).encode())
-        assert rendered > MAX_RESULT_BYTES * 0.5, (
-            "the guide shrank a lot; retune the headroom rather than leaving a "
-            "bound that can no longer be reached"
-        )
+        assert rendered < 8_000, f"the rendered guide grew to {rendered} bytes"
 
     def test_an_absurd_topic_is_not_echoed_whole(self):
         out = render(FULL_STATUS, topic="z" * 10_000)
@@ -169,11 +148,11 @@ class TestGuideContent:
         assert "blacklist=True" in text
 
     def test_names_a_function_by_assigning_the_signature_string(self):
-        """func.type only applies the name when given a string; handing it a
+        """f.type only applies the name when given a string; handing it a
         parsed Type sets the prototype and leaves sub_xxxx in place."""
         text = guide_text()
-        assert "func.type = signature" in text
-        assert "func.type = parsed" not in text
+        assert 'f.type = "uint32_t parse_record(' in text
+        assert "Type` object changes only the prototype" in text
 
     def test_passes_a_length_to_get_code_refs(self):
         """Without one, only refs to that exact byte are found."""
@@ -182,19 +161,18 @@ class TestGuideContent:
         text = guide_text()
         assert not re.search(r"get_code_refs\(\w+\)", text)
 
-    def test_states_the_timeout_and_that_it_discards_the_batch(self):
+    def test_states_the_timeout_and_transaction_rollback(self):
         text = guide_text()
-        assert "30-second limit" in text
-        assert "reverted when it eventually finishes" in text
+        assert "30 seconds" in text
+        assert "exception rolls it back" in text
 
     def test_covers_the_idioms_a_live_run_had_to_discover(self):
         """Each of these cost round trips in a real session."""
         text = guide_text()
         for idiom in (
-            "func.hlil.instructions",  # locating one address in a big body
+            "f.hlil.instructions",  # locating one address in a big body
             "get_ascii_string_at",  # reading a C string at a pointer
-            "bv.sections.values()",  # sections is a mapping
-            "get_comment_at",  # reading a comment back
+            "bv.sections",  # sections is a mapping
             "get_data_refs",  # a pointer table has data refs, not code refs
         ):
             assert idiom in text, idiom
@@ -203,8 +181,8 @@ class TestGuideContent:
         """The task the tool is uniquely suited to — two binaries open at
         once — had no section at all until a real port needed one."""
         text = guide_text()
-        assert "## Working across two databases" in text
-        assert 'define_user_type("config_t", tobj)' in text
+        assert "## Multiple binaries" in text
+        assert 'define_user_type("config_t", t)' in text
 
     def test_documents_how_to_tell_user_work_from_auto_analysis(self):
         """Guessing from naming conventions over-reports badly, and writing
@@ -215,31 +193,26 @@ class TestGuideContent:
         assert "user_type_container" in text
         assert "auto_discovered" in text
 
-    def test_warns_that_rendered_il_is_not_a_semantic_diff(self):
-        text = guide_text()
-        assert "MLIL_STORE" in text
-        assert "address_comments" in text
-
     def test_warns_against_touching_qt(self):
         """Scripts run on a worker thread; Qt from off the main thread
         segfaults Binary Ninja, and nothing stops the model trying."""
         text = guide_text()
-        assert "Do not touch the GUI" in text
-        assert "worker thread" in text
+        assert "Do not call Qt" in text
+        assert "GUI thread" in text
         assert "binaryninjaui" in text
 
     def test_tells_the_model_the_filesystem_is_available(self):
         """Without this the model assumes a sandbox and works around it, which
         is both slower and more token-expensive than just reading the file."""
         text = guide_text()
-        assert "There is no sandbox" in text
+        assert "filesystem access work" in text
         assert "original_filename" in text
 
     def test_says_the_target_is_the_only_writable_view(self):
         """The one rule the whole two-database story rests on: a write that is
         not to `bv` is not in a transaction."""
         text = guide_text()
-        assert "only view you can write to" in text
+        assert "only writable view" in text
         assert "h.read_only_view" in text
 
     def test_warns_against_using_a_handed_view_as_a_context_manager(self):
@@ -248,7 +221,7 @@ class TestGuideContent:
         closes the user's tab when applied to one you were handed."""
         text = guide_text()
         assert "context manager" in text
-        assert "file.close()" in text
+        assert "closes the user's view" in text
 
     def test_carries_no_project_specific_leftovers(self):
         """Guidance must generalise: no target-specific names, no dead API."""
@@ -256,38 +229,9 @@ class TestGuideContent:
         for leftover in ("nrf5", "softdevice", "ble_gap", "binja._bv", "binja."):
             assert leftover not in text, leftover
 
-    def test_troubleshooting_maps_the_errors_a_live_run_hit_to_a_fix(self):
-        """Every one of these was raised at a model in a real session, and each
-        has a specific answer it will not otherwise guess."""
-        text = guide_text()
-        assert "## Troubleshooting" in text
-        for message in (
-            "ReferenceError: BinaryView has been disposed",
-            "No open binary matches target",
-            "which this call opened read-only",
-            "A previous script is still running",
-            "Execution timed out",
-            "holds a BinaryView through default argument",
-            "captured a value from this call",
-            "no len()",
-            "'function' object has no attribute 'members'",
-        ):
-            assert message in text, message
-
-    def test_says_a_disposed_view_is_only_fixable_in_the_gui(self):
-        """Nothing a script does recovers it, so the model must stop trying and
-        ask for the tab to be closed and reopened."""
-        assert "closed and reopened in the GUI" in guide_text()
-
     def test_says_a_write_to_a_read_only_view_fails_only_at_the_end(self):
         """The assignment succeeds, so a script that tests its own write there
         concludes the opposite of the truth."""
         text = guide_text()
-        assert "succeeded in-script" in text
-        assert "cannot verify its own write" in text
-
-    def test_tells_the_model_not_to_build_its_own_rollback(self):
-        """Transactions make a rollback feature unnecessary; say so."""
-        text = guide_text()
-        assert "one undo transaction" in text
-        assert "should not build your own" in text
+        assert "after the script finishes" in text
+        assert "do not probe it with a test write" in text

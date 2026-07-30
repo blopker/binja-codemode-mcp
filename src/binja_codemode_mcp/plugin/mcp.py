@@ -21,59 +21,27 @@ PROTOCOL_VERSION = "2025-06-18"
 SERVER_NAME = "binja-codemode-mcp"
 SERVER_VERSION = "0.2.0"
 
-# Loaded at session start and always in context — the most expensive text here
-# per byte. Orientation only: mechanics belong in EXECUTE_DESCRIPTION, which is
-# always surfaced alongside the tool they govern. This field has to stand alone,
-# because some clients drop it. Truncated at 2 KB by some; a test enforces that.
+# Loaded at session start. Keep only orientation and safety rules that must be
+# visible before the first tool call.
 INSTRUCTIONS = """\
-Drive a live Binary Ninja session by writing Python.
+Run Python against the real Binary Ninja API with `execute`. Globals are `bv` (the
+`target` BinaryView), `bn` (binaryninja), and `h` (helpers). Only `bv` is writable;
+omit `target` only when one binary is open.
 
-`execute` gives you the REAL Binary Ninja API, not a wrapper — use what you already
-know from api.binary.ninja. Globals: `bv` (the BinaryView you are writing to), `bn`
-(the binaryninja module), `h` (this plugin's few helpers).
-
-`bv` is whichever binary the call's `target` names, so writes never land somewhere
-you did not ask for. With one binary open you can omit it.
-
-Calls are otherwise stateless, but `h.lib["name"] = fn` saves a function for later
-ones; it re-runs against the live database whenever you call `h.lib.name()`.
-
-Call `binja_guide` before your first non-trivial script: it reports the live session
-and the API calls that behave surprisingly.
-
-Only make database changes you are confident in; record ambiguity in a comment
-instead of guessing. Print addresses as hex."""
+Read `binja_guide` before non-trivial work. Change only what evidence supports;
+record uncertainty in comments."""
 
 EXECUTE_DESCRIPTION = """\
-Run Python against the selected binary in Binary Ninja: every query and every edit —
-reading bytes, decompiling, renaming, applying types, adding comments.
+Run Python with `bv` (the writable `target` BinaryView), `bn` (binaryninja), and
+`h` (`binaries()`, `read_only_view(name)`, `lib`). Builtins and imports work.
 
-Globals: `bv` (the real BinaryView named by `target`), `bn` (binaryninja module),
-`h` (helpers: `h.binaries()`, `h.read_only_view(name)`, `h.lib`). Real builtins and
-imports work.
-
-`target` names the ONE binary this call may write to; omit it only when a single
-binary is open. To read from a second, `h.read_only_view("other")` — a write through
-that is rolled back and fails the call, but only at the end: the assignment itself
-succeeds, so do not test a write to decide anything.
-
-`print()` is the return channel: verbatim, capped at 32 KB; a traceback comes back
-trimmed to its last 4 KB. Print addresses as hex. Do NOT iterate every function and
-decompile — filter to a handful first, or you blow the cap and the 30s limit.
-
-The whole script runs in one undo transaction on `target`: an exception reverts every
-change it made. Nothing persists to the next call except functions you save —
-`h.lib["name"] = fn`, then `h.lib.name()` — which re-run against the live database.
-Call `bv.update_analysis_and_wait()` after changing a function type or signature, or
-later reads see stale analysis.
-
-Read `binja_guide` first if you have not yet."""
+An exception rolls back the call. The limit is 30 seconds. Return data with
+`print()` (32 KB max; errors keep 4 KB); filter before decompiling and print
+addresses as hex. Calls are stateless except functions saved with
+`h.lib["name"] = fn`. Read `binja_guide` before non-trivial work."""
 
 GUIDE_DESCRIPTION = """\
-Read this before your first non-trivial script. Returns the live session state —
-binary, architecture, analysis status, Binary Ninja version, open tabs — then
-guidance on recovering data formats, defining types and data variables, applying
-function prototypes, and the calls that behave surprisingly."""
+Return live session details and concise guidance for safe queries and edits."""
 
 
 class Backend(Protocol):
@@ -183,15 +151,13 @@ class MCPHandler:
                         "target": {
                             "type": "string",
                             "description": (
-                                "Name of the binary to write to, as shown by "
-                                "binja_guide or h.binaries(). Optional when only "
-                                "one is open; required otherwise. This is the "
-                                "only view the script can write to."
+                                "Writable binary name. Optional when only one "
+                                "binary is open."
                             ),
                         },
                         "description": {
                             "type": "string",
-                            "description": "One line on what this script does.",
+                            "description": "Short log label.",
                         },
                     },
                     "required": ["code"],
@@ -205,10 +171,7 @@ class MCPHandler:
                     "properties": {
                         "topic": {
                             "type": "string",
-                            "description": (
-                                "Optional section name, e.g. 'Types', 'Functions', "
-                                "'Data variables'. Omit for the whole guide."
-                            ),
+                            "description": "Section name; omit for the full guide.",
                         }
                     },
                 },

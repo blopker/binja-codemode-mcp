@@ -1,17 +1,12 @@
 # Binary Ninja Code Mode MCP
 
-An MCP server that lets an LLM drive a live Binary Ninja session by writing Python
-against the **real** Binary Ninja API.
+An MCP server that lets an LLM drive a live Binary Ninja session with Python and the
+real `BinaryView` API—no wrapper dialect.
 
-There is no wrapper API to learn. Inside a tool call the model gets `bv` — the actual
-`BinaryView` — plus the `binaryninja` module, real builtins, and real imports. Models
-already know this API from api.binary.ninja, so they use it correctly instead of guessing
-at a bespoke dialect.
+Each call runs in one undo transaction. An exception reverts its changes; a successful
+batch is one undo step.
 
-Each call runs in one undo transaction: if the script raises, every change it made is
-reverted, and a successful batch collapses to a single ⌘Z.
-
-macOS, GUI, personal use.
+Currently tested on macOS with the Binary Ninja Personal GUI.
 
 ## Install
 
@@ -19,249 +14,168 @@ macOS, GUI, personal use.
 make install
 ```
 
-That symlinks `src/binja_codemode_mcp` into your Binary Ninja plugins folder, so editing
-the repo edits the plugin directly. Restart Binary Ninja afterwards. Override the location
-with `make install BN_USER_DIR=...` if yours differs.
+This symlinks `src/binja_codemode_mcp` into Binary Ninja's plugin directory. Restart
+Binary Ninja after installing. If your user directory differs:
 
-Nothing to pip install — Binary Ninja's bundled Python 3.10 has everything the plugin
-needs.
+```sh
+make install BN_USER_DIR=/path/to/binary-ninja/user
+```
 
-## Use
+There are no runtime dependencies or separate `pip install` step.
 
-1. Open a binary.
-2. `Plugins → Code Mode MCP → Start Server`, or click the status-bar indicator.
-3. The log prints the endpoint, the API key, and a ready-to-paste command:
+## Connect
 
-Claude
+Start the server from `Plugins → Code Mode MCP → Start Server` or the status-bar
+indicator. It can start without a binary open; open one before calling `execute`.
+The Binary Ninja log shows the endpoint and token. The commands below use their
+defaults.
+
+Claude Code:
+
 ```sh
 claude mcp add --transport http binja http://127.0.0.1:42069/mcp \
   --header "Authorization: Bearer binja-codemode-local"
 ```
 
-Opencode
+OpenCode:
+
 ```sh
 opencode mcp add binja --url http://127.0.0.1:42069/mcp \
   --header "Authorization=Bearer binja-codemode-local"
 ```
 
-If `claude mcp list` shows the server connected but `execute` and `binja_guide` do not
-appear in the tool list, reconnect the client. A reachable endpoint is not the same as
-registered tools, and the symptom looks like a broken server.
+Codex reads the token from an environment variable:
 
-Then just ask:
+```sh
+export BINJA_MCP_TOKEN=binja-codemode-local
+codex mcp add binja --url http://127.0.0.1:42069/mcp \
+  --bearer-token-env-var BINJA_MCP_TOKEN
+```
 
-- "Decompile main and tell me what the argument parsing does."
-- "Find every caller of memcpy and check whether the size is bounded."
-- "Name and type the functions in the 0x3a000 range from how their callers use them."
+This adds:
 
-## What the model gets
+```toml
+[mcp_servers.binja]
+url = "http://127.0.0.1:42069/mcp"
+bearer_token_env_var = "BINJA_MCP_TOKEN"
+```
 
-**Tools**
+Keep `BINJA_MCP_TOKEN` exported in sessions that use the server. If a client reaches
+the endpoint but does not expose `execute` and `binja_guide`, reconnect it.
 
-- `execute` — run Python against a named binary, which is the only one it can write to.
-- `binja_guide` — live session state (which binary, architecture, analysis status, open
-  tabs, Binary Ninja version) plus practical guidance on types, data variables, function
-  prototypes, and the API calls that behave surprisingly.
+Then ask for work directly:
 
-**Globals inside `execute`**
+- “Decompile main and explain the argument parsing.”
+- “Find every caller of memcpy and check whether the size is bounded.”
+- “Name and type the functions in the 0x3a000 range from their callers.”
 
-| Name | What |
+## Tool surface
+
+- `execute` runs Python against one open binary.
+- `binja_guide` returns live session details and concise guidance for safe queries and
+  edits.
+
+`execute` provides:
+
+| Name | Value |
 |---|---|
-| `bv` | The real `BinaryView` |
+| `bv` | The writable `BinaryView` selected by `target` |
 | `bn` | The `binaryninja` module |
-| `h` | `h.binaries()`, `h.read_only_view(name)`, `h.lib`, `h.lib_sources()` |
+| `h` | `binaries()`, `read_only_view(name)`, `lib`, and `lib_sources()` |
 
-Guidance is delivered three ways, because clients surface each differently: the MCP
-`instructions` field (always in context), the tool descriptions, and the `binja_guide`
-tool. Resources exist too, but nothing depends on them — in Claude Code a resource is
-`@`-mention only and the model cannot read one on its own.
+Builtins, imports, and filesystem access work. Return data with `print()`. Output is
+limited to 32 KB, errors retain 4 KB, and calls time out after 30 seconds.
 
-## Multiple binaries
+### Multiple binaries
 
-Open as many as you like. Every `execute` call names its `target` — the one binary it may
-write to — so a write can never land somewhere nobody chose. With a single binary open the
-parameter is optional; with more than one it is required, and omitting it is an error that
-lists the candidates.
+With one binary open, `target` is optional. With several, every `execute` call must
+name its writable target. Names match any unique part of an open binary's name or path;
+ambiguous matches are rejected.
 
-A second binary is read through `h.read_only_view("name")`, which returns the real
-`BinaryView`. Both are live in the same call, which is what a cross-database port needs:
-`Type` objects move between views directly and cannot survive to the next call. Writing
-through a read-only view is detected, rolled back, and fails the call.
+Read another open binary with `h.read_only_view("name")`. It returns a live
+`BinaryView`, so types and annotations can move directly between databases. A write
+through it is rolled back and fails the call.
 
-## Configuration
+### Saved functions
 
-Optional, at `<user dir>/codemode_mcp/config.json`:
+Calls do not share variables or imports. Save reusable functions with:
+
+```python
+h.lib["name"] = function
+```
+
+Call one later as `h.lib.name()`. It runs against the current database rather than
+caching a result. `print(h.lib)` lists saved functions and `h.lib_sources()` exports
+them.
+
+## Configuration and safety
+
+The optional configuration file is `<Binary Ninja user directory>/codemode_mcp/config.json`:
 
 ```json
 { "api_key": "your-key" }
 ```
 
-The server binds `127.0.0.1`, validates `Origin`, and requires the bearer token.
+The server binds to `127.0.0.1`, checks `Origin`, and requires the bearer token. The
+default token is intended to prevent accidental access, not secure the endpoint from
+other local software.
 
-## Safety
-
-This runs arbitrary Python inside your Binary Ninja process, with your permissions, and
-there is deliberately no sandbox. An AST filter over submitted code cannot contain it —
-CPython injects the real `builtins` module whenever the globals dict has no
-`__builtins__` key, so `open` and `__import__` stay reachable at runtime no matter what
-the filter rejects by name — while it does reliably block legitimate stdlib use like
-`struct` and `pathlib`. The undo transaction is the real protection: a failed script
-reverts, and any batch can be undone in one step. Point it at trusted clients only.
-
-## Design notes
-
-**The real API, not a wrapper.** A curated `binja.*` facade looks like it saves tokens and
-does the opposite: models already know `BinaryView` from pretraining, so a smaller dialect
-costs far more in failed calls and hallucination recovery than the curation saves. It also
-goes stale against the API it wraps. Exposing `bv` deletes that whole class of problem.
-
-**One transaction per call.** Mutations applied outside an undo transaction do not
-register as undo actions, which means Binary Ninja's modified-tracking may not fire and
-the edits can be lost on save. Wrapping the whole script also makes a tool call atomic and
-collapses a batch to one ⌘Z, which is what a checkpoint/rollback feature would otherwise
-try — and fail — to provide. The executor drives `begin_undo_actions` /
-`commit_undo_actions` by hand rather than using the `undoable_transaction` context
-manager, because a batch that outran the timeout has to revert on its way out and the
-context manager would commit it. Scripts are serialised for the same reason: two open undo
-states on one database interleave, so reverting one can rewind the other.
-
-**Functions persist, values do not.** No variables or imports survive an `execute` call;
-functions assigned into `h.lib` do. Storing values would mean answering "is this still
-true?" on every read, and a namespace neither side can see is worse than re-deriving.
-A stored function never raises that question — it re-runs against the live database — so
-the library is closer to a per-session set of tools than to a cache. Each entry is rebound
-to the calling script's scope on the way out, because a function otherwise resolves
-globals from the call that defined it: it would see that call's `bv` forever, and its
-`print` would write into an output buffer that closed long ago. The footer lists what is
-saved on every result, so the library is the most visible thing in the session rather
-than the least.
-
-**The target is a call parameter, not session state.** An earlier design pinned a target
-and let scripts rebind it mid-run, which put three sources of truth in play: the view the
-transaction was opened on, the view the script could see, and the pin deciding where the
-next call would start. They could disagree, and when they did a write landed outside any
-transaction. Naming the target in the call collapses all three — the transaction is opened
-on the view the script writes to, by construction — and leaves nothing to go stale, so a
-reopened file simply works. Names, never indices: indices follow tab order and change when
-tabs are dragged.
-
-**Three guidance layers**, because clients surface each differently. The `instructions`
-field is always in context; tool descriptions load when a tool is pulled in; `binja_guide`
-is unbounded and on demand. Both `instructions` and tool descriptions are truncated at
-2 KB by some clients, so they stay short and front-loaded — tests enforce the budget.
+Submitted code runs inside Binary Ninja with your user permissions. There is
+deliberately no sandbox: Python can read files, import modules, and start processes.
+Undo transactions protect Binary Ninja database edits, not the filesystem or other
+side effects. Connect only trusted clients.
 
 ## Development
 
 ```sh
-make setup      # uv sync
-make test       # lint + typecheck + tests
-make fmt        # apply autofixes and format
-make install    # symlink into Binary Ninja
-make status     # is it linked, is the endpoint up
-make driver     # drive a live session through tests/driver_plan.md
+make setup      # install development dependencies
+make test       # lint, type-check, and run tests
+make fmt        # apply formatting and lint fixes
+make install    # symlink the plugin into Binary Ninja
+make status     # inspect the link and endpoint
+make driver     # run the live-session test plan
 ```
 
-`make help` lists everything.
+`make help` lists all targets. The project targets Python 3.10 to match Binary Ninja
+and has no runtime dependencies. Type checking uses the Binary Ninja API from the app
+bundle.
 
-`.python-version` pins 3.10 to match Binary Ninja's bundled interpreter; testing on newer
-Python would pass code that fails in the host. There are no runtime dependencies, and
-there must not be — the plugin has to load without pip, so there is deliberately no
-`requirements.txt` for the plugin manager to act on.
+### Reloading
 
-Type checking runs on [ty](https://github.com/astral-sh/ty), pointed at the Binary Ninja
-API inside the app bundle. It is pre-1.0, so expect its diagnostics to shift between
-releases. Write suppressions as a bare `# type: ignore`; ty also accepts
-`# ty: ignore[rule]`.
-
-`pyproject.toml` also carries a `[tool.basedpyright]` block so an editor's language server
-resolves the same imports — the package lives under `src/` and the Binary Ninja API lives
-in the app bundle, so without it both look missing. It is editor-only: not a gate, not a
-dependency. A local `pyrightconfig.json` would override it, and is gitignored.
-
-### Iterating inside Binary Ninja
-
-`make install` symlinks the package, so edits land immediately — but Python still has the
-old modules loaded. In Binary Ninja's Python console:
+Because installation uses a symlink, edits are immediately visible on disk, but Python
+keeps imported modules in memory. In Binary Ninja's console:
 
 ```python
 import binja_codemode_mcp, importlib
 importlib.reload(binja_codemode_mcp)
 ```
 
-Then `[UP] [ENTER]` to re-run after each edit. One caveat: a running server keeps serving
-the modules it was started with — stop it, reload, start it again. When anything looks
-stale, restart Binary Ninja. Re-registering a command of the same name replaces the
-existing one, and the status widget tears down its previous notification on reload, so
-neither duplicates.
+Stop the server before reloading and start it again afterward. Restart Binary Ninja if
+behavior still appears stale.
 
-For step debugging, `pip install --user debugpy`, then call
-`connect_vscode_debugger(port=12345)` in the Binary Ninja console and attach with a path
-mapping of `/` to `/`.
+### Testing
 
-### Testing without a licence
+`pytest` cannot create a real `BinaryView` with a Personal license, so unit and socket
+integration tests use a small fake. `make driver` exercises transactions, undo grouping,
+tabs, and the guide against a live Binary Ninja session using `tests/driver_plan.md`.
 
-`import binaryninja` succeeds outside the GUI, so **the type checker resolves real types**
-from the app bundle. `binaryninja.load()` does not — a Personal licence forbids headless — so
-**pytest can never construct a real `BinaryView`**. Three consequences:
+## Known limitations
 
-- A module that imports `binaryninja` at module scope poisons the import path for
-  everything under it. Hence the guarded import in `binja_codemode_mcp/__init__.py` and
-  the empty `plugin/__init__.py`.
-- Everything except `commands.py`, `widget.py`, and `uicontext.py` is pure and directly
-  testable. `tests/conftest.py` supplies a small `FakeBinaryView` for the rest. It stays
-  small on purpose: a large fake would mean we had rebuilt the wrapper we removed.
-- `tests/test_integration.py` drives the whole stack over a real socket and asserts on
-  what a client actually receives.
-
-### Checks that only work against a live session
-
-Whether a transaction reaches the `.bndb` cannot be tested here, and neither can undo
-grouping, tab handling, or the guide's own advice. `tests/driver_plan.md` covers that:
-`make driver` lays out fresh copies of `/bin/ls` under `scratch/driver/` and hands the
-plan to a model connected to a running server, which works through it and writes a report
-to `scratch/`. A human is needed twice — once to set up, once at a
-checkpoint that needs a save, a tab close, and a look at the window.
-
-Read the report's E2 section first. Asking what the driver had to discover by trial and
-error is what produced most of `guide.md`, and it has repeatedly found things the suite
-could not: a failed script keeping its changes, a guide call swallowing a target switch,
-and a write landing outside its transaction after a mid-script retarget.
-
-Treat a reported failure as a hypothesis. Two have turned out to be artifacts of how the
-run was conducted rather than defects, so measure before changing anything — both times
-the disproof took two calls.
-
-### Known limitations
-
-- The execution timeout interrupts a running script only sometimes. A script that outran
-  it is marked abandoned, so it reverts rather than commits whenever it finishes, and no
-  other script can run until it does. On top of that the executor raises an asynchronous
-  exception into it, which evicts a plain runaway loop immediately — but measurably does
-  **not** evict a loop whose body contains a `try`/`except`, and does nothing at all while
-  the script sits inside a long Binary Ninja core call. A script of either shape still
-  holds the executor until it returns on its own.
-- `tools/list_changed` is advertised but never emitted: the tool surface does not actually
-  change when tabs open and close, and the guide header is regenerated per call.
-- `uicontext.list_tabs()` depends on `binaryninjaui` methods that have no type stubs. If
-  they misbehave it degrades to single-binary mode rather than reporting no binary open.
-- **A failed script pulls the Binary Ninja window to the foreground.** Every failure
-  reverts its undo transaction, and `revert_undo_actions` raises the window even when the
-  transaction recorded nothing — so a typo costs a window raise. Confirmed by isolating
-  the cases against a live instance: an empty *commit* is silent, an empty *revert* pops.
-  Skipping the revert when nothing changed would fix it, but nothing available answers
-  "did this script change anything" reliably (`file.modified` does not move on a rename;
-  `file.undo_entries` only grows at commit), and an earlier attempt to gate on
-  `file.modified` silently stopped failed scripts reverting at all. The redraw is
-  cosmetic; the revert is the guarantee the plugin exists for. See `settle()` in
-  `plugin/executor.py`.
+- Timeout interruption is best-effort. Plain Python loops are usually interrupted, but
+  a core API call or a loop that catches exceptions may continue. The call is marked
+  abandoned and reverts when it finishes; later calls wait meanwhile.
+- A failed call may bring the Binary Ninja window forward because reverting even an
+  empty undo transaction raises the window. The redraw is cosmetic.
+- Multi-tab discovery relies on untyped `binaryninjaui` APIs. If it fails, the plugin
+  falls back to the current binary.
 
 ## License
 
-GPL-3.0-or-later — see [LICENSE](LICENSE). Copyright (C) 2026 BO LLC.
+GPL-3.0-or-later—see [LICENSE](LICENSE). Copyright (C) 2026 BO LLC.
 
 ## Acknowledgements
 
 Started as a fork of
 [binja-codemode-mcp](https://github.com/akrutsinger/binja-codemode-mcp) by Austyn
-Krutsinger. Almost none of that code survives the rewrite, but the idea — let the model
-write Python against Binary Ninja instead of calling a wrapper — came from there.
+Krutsinger. The core idea—let the model use Binary Ninja's Python API directly—came
+from that project.
