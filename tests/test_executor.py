@@ -8,9 +8,11 @@ import pytest
 from binja_codemode_mcp.plugin.executor import (
     KEEP_SOURCES,
     SCRIPT_PREFIX,
+    TIMEOUT_CHECK_GLOBAL,
     Batch,
     CodeExecutor,
     ExecutionResult,
+    compile_script,
 )
 
 
@@ -245,12 +247,10 @@ class TestInterruption:
     the process, so one `while True:` disabled the plugin until Binary Ninja was
     restarted.
 
-    Best-effort, and deliberately not tested beyond what it delivers: CPython's
-    asynchronous exception does not evict a loop whose body contains a
-    `try`/`except`, and no amount of re-arming changes that. Such a script still
-    holds the lock until it finishes, exactly as before. There is no test for it
-    here because the only way to write one is to leave a thread spinning for the
-    rest of the session."""
+    Best-effort: a C call cannot be stopped while it is running, dynamically
+    compiled code is not transformed, and arbitrary Python can deliberately
+    evade a cooperative check. Such a script still holds the lock until it
+    finishes."""
 
     def test_a_runaway_loop_is_evicted_and_rolled_back(self, bv):
         executor = CodeExecutor(timeout=0.2)
@@ -270,6 +270,92 @@ class TestInterruption:
         assert executor.execute("print('recovered')", target=bv).output.strip() == (
             "recovered"
         )
+
+    def test_an_infinite_loop_inside_a_function_is_evicted(self, bv):
+        executor = CodeExecutor(timeout=0.2)
+        result = executor.execute(
+            "def spin():\n    while True:\n        pass\nspin()", target=bv
+        )
+        assert result.timed_out
+        assert executor.wait_for_idle(timeout=3)
+        assert bv.reverted == 1
+
+    def test_an_infinite_for_iterator_is_evicted(self, bv):
+        executor = CodeExecutor(timeout=0.2)
+        result = executor.execute(
+            "import itertools\nfor _ in itertools.count():\n    pass", target=bv
+        )
+        assert result.timed_out
+        assert executor.wait_for_idle(timeout=3)
+        assert bv.reverted == 1
+
+    def test_timeout_during_transaction_setup_cannot_strand_the_undo_state(self, bv):
+        """The old asynchronous exception could land after begin_undo_actions()
+        opened a state but before Batch recorded it. The worker then exited with
+        an undo transaction that nothing could commit or revert."""
+        import threading
+
+        entered = threading.Event()
+        release = threading.Event()
+
+        class SlowBegin(type(bv)):
+            def begin_undo_actions(self, anonymous_allowed=True):
+                state = super().begin_undo_actions(anonymous_allowed)
+                entered.set()
+                release.wait(5)
+                return state
+
+        view = SlowBegin("slow")
+        executor = CodeExecutor(timeout=0.05)
+        result = executor.execute("bv.rename('never_lands')", target=view)
+
+        assert entered.is_set()
+        assert result.timed_out
+        assert view.transactions == 1
+        assert view.committed == 0 and view.reverted == 0
+
+        release.set()
+        assert executor.wait_for_idle(timeout=3)
+        assert view.renames == []
+        assert view.reverted == 1
+        assert view._snapshots == {}
+
+
+class TestCheckpointCompilation:
+    """Every intended safe point receives the live timeout checker."""
+
+    @staticmethod
+    def _all_code_names(code):
+        import types
+
+        names = set(code.co_names)
+        for value in code.co_consts:
+            if isinstance(value, types.CodeType):
+                names.update(TestCheckpointCompilation._all_code_names(value))
+        return names
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            "while ready:\n    work()",
+            "for item in items:\n    work(item)",
+            "async def consume():\n    async for item in items:\n        work(item)",
+            "def work():\n    return 1",
+            "async def work():\n    return 1",
+        ],
+    )
+    def test_safe_point_references_the_timeout_checker(self, source):
+        compiled = compile_script(source, f"{SCRIPT_PREFIX}checkpoint>")
+        assert TIMEOUT_CHECK_GLOBAL in self._all_code_names(compiled)
+
+    def test_function_checkpoint_preserves_its_docstring(self):
+        compiled = compile_script(
+            'def documented():\n    """Kept."""\n    return 1',
+            f"{SCRIPT_PREFIX}docstring>",
+        )
+        scope = {TIMEOUT_CHECK_GLOBAL: lambda: None}
+        exec(compiled, scope, scope)
+        assert scope["documented"].__doc__ == "Kept."
 
 
 class TestBatchInvariants:

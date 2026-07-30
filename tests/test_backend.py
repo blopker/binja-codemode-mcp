@@ -358,6 +358,19 @@ class TestLibrary:
         )
         assert "from the library" in backend.execute("h.lib.shout()").output
 
+    def test_a_saved_infinite_loop_uses_the_current_calls_timeout(self, config, tabs):
+        config.execution_timeout_s = 0.2
+        backend = PluginBackend(config, tabs_provider=lambda: tabs)
+        saved = backend.execute(
+            "def spin():\n    while True:\n        pass\nh.lib['spin'] = spin"
+        )
+        assert saved.success
+
+        result = backend.execute("h.lib.spin()")
+        assert result.timed_out
+        assert backend.executor.wait_for_idle(timeout=3)
+        assert tabs[0].bv.reverted == 1
+
     def test_a_captured_helper_follows_the_calling_targets_view(self, config, bv):
         """A sibling function carries its own __globals__ — the defining call's
         scope, with that call's bv. Left alone it writes to the binary the

@@ -16,13 +16,19 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..config import Config
-from .executor import SCRIPT_PREFIX, Batch, CodeExecutor, ExecutionResult
+from .executor import (
+    SCRIPT_PREFIX,
+    TIMEOUT_CHECK_GLOBAL,
+    Batch,
+    CodeExecutor,
+    ExecutionResult,
+)
 from .guide import render
 from .session import BinarySession, BinaryTab, _same_view
 
 # Supplied fresh on every call, so a saved function must never carry the
 # defining call's copies of these.
-LIVE_GLOBALS = ("bv", "bn", "h", "print")
+LIVE_GLOBALS = ("bv", "bn", "h", "print", TIMEOUT_CHECK_GLOBAL)
 
 
 @dataclass

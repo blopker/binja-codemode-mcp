@@ -3,8 +3,8 @@
 Pure module: views are duck-typed, so this is testable without Binary Ninja.
 """
 
+import ast
 import contextlib
-import ctypes
 import itertools
 import linecache
 import threading
@@ -21,11 +21,11 @@ from .session import _same_view
 # quote the line that raised instead of just numbering it, and inspect.getsource
 # works on functions the script saved into h.lib.
 SCRIPT_PREFIX = "<mcp:"
+TIMEOUT_CHECK_GLOBAL = "__binja_mcp_check_timeout__"
 # How long an interrupted script is given to unwind and revert before the caller
-# stops waiting. A Python-level loop raises at the next backward jump and settles
-# immediately, so this only has to cover the unwind — and a thread blocked in a C
-# call will never see the exception at all, so waiting longer buys nothing except
-# a slower answer on exactly the calls that already took the full timeout.
+# stops waiting. Guarded Python raises at the next loop iteration or function
+# entry and settles immediately, so this only has to cover the unwind. A thread
+# still blocked in a C call cannot see the check yet.
 INTERRUPT_GRACE_S = 0.1
 KEEP_SOURCES = 8  # recent scripts whose text stays available
 _call_seq = itertools.count(1)
@@ -55,43 +55,76 @@ def publish_source(name: str, code: str) -> None:
 
 
 class _Abandoned(BaseException):
-    """Raised into a script that outran its deadline.
+    """Raised from a cooperative checkpoint after a call outruns its deadline.
 
     BaseException, not Exception: a script wrapping its loop in
     `except Exception` would otherwise swallow its own eviction.
     """
 
 
-def _interrupt(thread: threading.Thread) -> bool:
-    """Raise _Abandoned inside a running thread. True if it was delivered.
+class _GuardCheckpoints(ast.NodeTransformer):
+    """Add cooperative timeout checks at loop iterations and function entry."""
 
-    CPython cannot kill a thread, but it will raise asynchronously into one.
-    The exception does not fire while the thread sits in a C call — it stays
-    pending and raises at the next bytecode boundary — so it cannot land inside
-    a Binary Ninja core operation mid-write.
-
-    Best effort, and the limits are real. Measured: it evicts a bare
-    `while True:` immediately, does nothing until a long core call returns, and
-    does **not** evict a loop whose body contains a `try`/`except` at all —
-    re-arming does not help. A script of that shape still holds the executor
-    until it finishes, which is what happened before any of this existed, so a
-    failed interrupt costs nothing beyond the attempt.
-    """
-    ident = thread.ident
-    if ident is None:
-        return False
-    try:
-        delivered = ctypes.pythonapi.PyThreadState_SetAsyncExc(
-            ctypes.c_ulong(ident), ctypes.py_object(_Abandoned)
+    @staticmethod
+    def _check(node: ast.AST) -> ast.Expr:
+        check = ast.Expr(
+            value=ast.Call(
+                func=ast.Name(id=TIMEOUT_CHECK_GLOBAL, ctx=ast.Load()),
+                args=[],
+                keywords=[],
+            )
         )
-    except Exception:
+        return ast.copy_location(check, node)
+
+    def visit_While(self, node: ast.While) -> ast.While:
+        self.generic_visit(node)
+        node.body.insert(0, self._check(node))
+        return node
+
+    def visit_For(self, node: ast.For) -> ast.For:
+        self.generic_visit(node)
+        node.body.insert(0, self._check(node))
+        return node
+
+    def visit_AsyncFor(self, node: ast.AsyncFor) -> ast.AsyncFor:
+        self.generic_visit(node)
+        node.body.insert(0, self._check(node))
+        return node
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> ast.FunctionDef:
+        self.generic_visit(node)
+        # The first string expression defines __doc__; putting a checkpoint
+        # before it would silently erase the function's docstring.
+        index = 1 if _starts_with_docstring(node.body) else 0
+        node.body.insert(index, self._check(node))
+        return node
+
+    def visit_AsyncFunctionDef(
+        self, node: ast.AsyncFunctionDef
+    ) -> ast.AsyncFunctionDef:
+        self.generic_visit(node)
+        index = 1 if _starts_with_docstring(node.body) else 0
+        node.body.insert(index, self._check(node))
+        return node
+
+
+def _starts_with_docstring(body: list[ast.stmt]) -> bool:
+    if not body or not isinstance(body[0], ast.Expr):
         return False
-    if delivered > 1:
-        # Documented recovery: undo rather than leave exceptions pending in
-        # threads we did not mean to touch.
-        ctypes.pythonapi.PyThreadState_SetAsyncExc(ctypes.c_ulong(ident), None)
-        return False
-    return delivered == 1
+    value = body[0].value
+    return isinstance(value, ast.Constant) and isinstance(value.value, str)
+
+
+def compile_script(code: str, name: str) -> Any:
+    """Compile MCP source with safe points in loops and functions.
+
+    The check is part of submitted code, so it cannot fire during transaction
+    setup or settlement.
+    """
+    tree = ast.parse(code, name, "exec")
+    tree = _GuardCheckpoints().visit(tree)
+    ast.fix_missing_locations(tree)
+    return compile(tree, name, "exec")
 
 
 @dataclass
@@ -143,10 +176,8 @@ class _Budget:
         Exactly one script runs at a time, so there is one writer and one
         reader. `list.append` and a slice are each a single C-level operation
         under the GIL, which is all the safety this needs — and a lock here
-        would be a deadlock waiting to happen: an abandoned script is
-        interrupted with an asynchronous exception, and one landing between
-        acquiring this lock and releasing it would block the caller's read
-        forever. A racy `_size` costs at most a chunk either side of the cap.
+        would add overhead to every print. A racy `_size` costs at most a chunk
+        either side of the cap.
         """
         if self._truncated:
             return
@@ -332,7 +363,7 @@ class CodeExecutor:
 
         script_name = next_script_name()
         try:
-            compiled = compile(code, script_name, "exec")
+            compiled = compile_script(code, script_name)
         except SyntaxError as e:
             return ExecutionResult(success=False, output="", error=f"Syntax error: {e}")
 
@@ -376,6 +407,10 @@ class CodeExecutor:
                 end = kwargs.get("end", "\n")
                 budget.write(sep.join(str(a) for a in args) + end)
 
+            def check_timeout() -> None:
+                if outcome.abandoned:
+                    raise _Abandoned
+
             # Same dict for globals and locals: with separate dicts, names bound
             # at the top level land in `locals` while nested scopes resolve
             # against `globals`, so functions and comprehensions raise NameError.
@@ -385,6 +420,7 @@ class CodeExecutor:
                 "bn": bn,
                 "h": helpers,
                 "print": captured_print,
+                TIMEOUT_CHECK_GLOBAL: check_timeout,
             }
             if extra:
                 scope.update(extra)
@@ -414,8 +450,8 @@ class CodeExecutor:
                 try:
                     exec(compiled, scope, scope)
                 except _Abandoned:
-                    # We raised this. The caller has already reported the
-                    # timeout, so a traceback here would only be noise.
+                    # A checkpoint raised after the caller marked the script
+                    # abandoned. A traceback would only be noise.
                     outcome.error = "Interrupted after exceeding the time limit."
                     revert = True
                 except BaseException as e:
@@ -477,14 +513,9 @@ class CodeExecutor:
         # model would re-run it and apply everything twice.
         if not outcome.settled:
             outcome.abandoned = True
-            # Evict it rather than let it hold the lock for the life of the
-            # process. It reverts on the way out through the same path a raising
-            # script takes, so nothing new has to undo anything.
-            # Only while the script itself is still running. Once it is
-            # settling, the database is mid-commit and an exception landing
-            # there would abandon a half-closed transaction — worse than the
-            # runaway this is meant to evict.
-            if not outcome.settling and _interrupt(thread):
+            # A loop or function checkpoint sees `abandoned` at its next safe
+            # point. Give ordinary Python a moment to unwind and revert.
+            if not outcome.settling:
                 thread.join(timeout=INTERRUPT_GRACE_S)
             elapsed = time.time() - started
             if outcome.settled:
@@ -503,8 +534,8 @@ class CodeExecutor:
                 )
             else:
                 detail = (
-                    "the script cannot be interrupted, so its changes are reverted "
-                    "when it finishes."
+                    "the script has not reached a cooperative timeout checkpoint, "
+                    "so its changes are reverted when it finishes."
                 )
             return ExecutionResult(
                 success=False,

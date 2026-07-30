@@ -161,9 +161,10 @@ tabs, and the guide against a live Binary Ninja session using `tests/driver_plan
 
 ## Known limitations
 
-- Timeout interruption is best-effort. Plain Python loops are usually interrupted, but
-  a core API call or a loop that catches exceptions may continue. The call is marked
-  abandoned and reverts when it finishes; later calls wait meanwhile.
+- Submitted loops and function entries contain cooperative timeout checks, so
+  accidental infinite loops and recursion are interrupted and rolled back. A core
+  API call or code without a checkpoint may continue; it is marked abandoned and
+  reverts when it finishes. Later calls wait meanwhile.
 - A failed call may bring the Binary Ninja window forward because reverting even an
   empty undo transaction raises the window. The redraw is cosmetic.
 - Multi-tab discovery relies on untyped `binaryninjaui` APIs. If it fails, the plugin
