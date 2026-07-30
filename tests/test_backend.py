@@ -146,47 +146,52 @@ class TestTargeting:
 class TestLogging:
     """The log is where the user watches what is being done to their database."""
 
-    def _backend(self, config, bv):
-        lines: list[str] = []
-        tabs = [BinaryTab(0, "ls-a", "/bin/ls-a", bv)]
-        backend = PluginBackend(config, tabs_provider=lambda: tabs, log=lines.append)
-        return backend, lines
+    @pytest.fixture
+    def records(self, caplog):
+        import logging
 
-    def test_a_call_announces_itself_before_running(self, config, bv):
+        target = logging.getLogger("binja_codemode_mcp.plugin.backend")
+        old_level = target.level
+        target.addHandler(caplog.handler)
+        target.setLevel(logging.INFO)
+        try:
+            yield caplog
+        finally:
+            target.removeHandler(caplog.handler)
+            target.setLevel(old_level)
+
+    def _backend(self, config, bv):
+        tabs = [BinaryTab(0, "ls-a", "/bin/ls-a", bv)]
+        return PluginBackend(config, tabs_provider=lambda: tabs)
+
+    def test_a_call_announces_itself_before_running(self, config, bv, records):
         """Said up front, not only on the way out: a script that never returns
         would otherwise leave no trace of what it was doing."""
-        backend, lines = self._backend(config, bv)
+        backend = self._backend(config, bv)
         backend.execute("bv.rename('x')", None, "rename five functions")
-        assert "running on ls-a — rename five functions" in lines[0]
+        assert records.records[0].getMessage() == (
+            "running on ls-a — rename five functions"
+        )
 
-    def test_the_end_reports_the_verdict_and_elapsed(self, config, bv):
-        backend, lines = self._backend(config, bv)
+    def test_the_end_reports_the_verdict_and_elapsed(self, config, bv, records):
+        backend = self._backend(config, bv)
         backend.execute("pass")
-        assert "ok in " in lines[-1]
+        assert "ok in " in records.records[-1].getMessage()
 
-    def test_a_failure_says_it_rolled_back(self, config, bv):
-        backend, lines = self._backend(config, bv)
+    def test_a_failure_says_it_rolled_back(self, config, bv, records):
+        backend = self._backend(config, bv)
         backend.execute("bv.rename('x')\nraise ValueError('boom')")
-        assert "failed, rolled back" in lines[-1]
+        assert "failed, rolled back" in records.records[-1].getMessage()
 
-    def test_a_refused_target_is_logged_too(self, config, bv):
+    def test_a_refused_target_is_logged_too(self, config, bv, records):
         other = type(bv)("other")
         tabs = [
             BinaryTab(0, "ls-a", "/bin/ls-a", bv),
             BinaryTab(1, "ls-b", "/bin/ls-b", other),
         ]
-        lines: list[str] = []
-        backend = PluginBackend(config, tabs_provider=lambda: tabs, log=lines.append)
+        backend = PluginBackend(config, tabs_provider=lambda: tabs)
         backend.execute("pass")
-        assert any("refused" in line for line in lines)
-
-    def test_a_logger_that_raises_cannot_take_a_call_down(self, config, bv):
-        def boom(_message):
-            raise RuntimeError("log died")
-
-        tabs = [BinaryTab(0, "ls-a", "/bin/ls-a", bv)]
-        backend = PluginBackend(config, tabs_provider=lambda: tabs, log=boom)
-        assert backend.execute("print('fine')").output.strip() == "fine"
+        assert any("refused" in record.getMessage() for record in records.records)
 
 
 class TestRunningScript:

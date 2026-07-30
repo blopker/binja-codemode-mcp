@@ -8,6 +8,7 @@ Pure module: stdlib only, the handler is injected.
 
 import hmac
 import json
+import logging
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -15,6 +16,8 @@ from typing import Any
 from urllib.parse import urlparse
 
 from .mcp import PROTOCOL_VERSION
+
+logger = logging.getLogger(__name__)
 
 MAX_BODY_BYTES = 8 * 1024 * 1024
 
@@ -307,12 +310,12 @@ class _Server(ThreadingHTTPServer):
 
         socketserver's default prints the stack to stderr, which Binary Ninja
         surfaces in the Log pane where it reads as a plugin crash and buries
-        real messages. Anything unexpected still gets logged, once, as a line.
+        real messages. Anything unexpected is logged with its traceback.
         """
         exc = sys.exc_info()[1]
         if isinstance(exc, ConnectionError | BrokenPipeError | TimeoutError):
             return
-        print(f"binja-mcp: error handling {client_address}: {exc!r}", file=sys.stderr)
+        logger.exception("error handling client %s", client_address)
 
 
 class MCPHTTPServer:

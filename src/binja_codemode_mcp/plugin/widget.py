@@ -8,9 +8,9 @@ dependency behind a try/except that leaves every name possibly-unbound.
 """
 
 import contextlib
+import logging
 
 from binaryninja import execute_on_main_thread, execute_on_main_thread_and_wait
-from binaryninja.log import log_debug, log_error
 
 # binaryninjaui MUST be imported before PySide6: it selects the PySide6 build
 # that matches the host, and importing PySide6 first can load the wrong one and
@@ -19,6 +19,8 @@ from binaryninja.log import log_debug, log_error
 from binaryninjaui import UIContext, UIContextNotification  # type: ignore
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import QHBoxLayout, QPushButton, QWidget
+
+logger = logging.getLogger(__name__)
 
 # Module-level state
 _status_button = None
@@ -94,7 +96,7 @@ def _on_button_click():
     global _plugin_instance
 
     if _plugin_instance is None:
-        log_error("MCP Status: Plugin instance not set")
+        logger.error("status widget has no plugin instance")
         return
 
     try:
@@ -106,8 +108,8 @@ def _on_button_click():
             _plugin_instance.stop_server()
         else:
             _plugin_instance.start_server()
-    except Exception as e:
-        log_error(f"MCP Status: Error toggling server: {e}")
+    except Exception:
+        logger.exception("error toggling server from status widget")
 
 
 def _update_status_indicator():
@@ -156,7 +158,7 @@ def _ensure_indicator_in_status_bar():
 
     # Insert at position 1 (after the first default widget)
     status_bar.insertWidget(1, container, 0)
-    log_debug("MCP Status: Added status indicator to status bar")
+    logger.debug("added status indicator to status bar")
 
 
 def _timer_tick():
@@ -195,7 +197,7 @@ class MCPUINotification(UIContextNotification):
         would mark the server failed and require a reconnect; reporting "no
         binary open" per request is better.
         """
-        log_debug("MCP Status: file closed; server left running")
+        logger.debug("file closed; server left running")
         execute_on_main_thread(lambda: _update_status_indicator())
 
 
@@ -231,7 +233,7 @@ def _init_status_indicator(plugin_instance):
     _indicator_timer.timeout.connect(_timer_tick)
     _indicator_timer.start()
 
-    log_debug("MCP Status: Status indicator initialized")
+    logger.debug("status indicator initialized")
 
 
 def update_status(running: bool, *, shutting_down: bool = False):

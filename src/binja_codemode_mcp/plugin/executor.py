@@ -215,7 +215,10 @@ class _Budget:
         remedy = (
             "full output is in the artifact below"
             if full_output
-            else "rerun a narrower script or print a smaller slice"
+            else (
+                "rerun with output_directory and output_extension for complete "
+                "output, or print a smaller slice"
+            )
         )
         return out + (f"\n... (truncated at {self.max_bytes} bytes; {remedy})")
 

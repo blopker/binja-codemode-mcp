@@ -1,18 +1,27 @@
 """Plugin lifecycle and Binary Ninja command registration."""
 
+import logging
 import threading
 
 import binaryninja
 from binaryninja import PluginCommand
-from binaryninja.log import log_error, log_info
+from binaryninja.log import log_debug, log_error, log_info, log_warn
 
 from ..config import Config
 from .backend import PluginBackend, render_status_report
-from .logging import log_message
+from .logging import LOG_PREFIX, configure_binary_ninja_logging
 from .mcp import MCPHandler
 from .server import MCPHTTPServer
 from .uicontext import list_tabs
 from .widget import update_status
+
+configure_binary_ninja_logging(
+    debug=log_debug,
+    info=log_info,
+    warning=log_warn,
+    error=log_error,
+)
+logger = logging.getLogger(__name__)
 
 
 class BinjaCodeModeMCP:
@@ -47,10 +56,10 @@ class BinjaCodeModeMCP:
 
     def start_server(self, bv: object = None) -> None:
         if self.is_shutting_down:
-            log_error(log_message("still shutting down."))
+            logger.error("still shutting down.")
             return
         if self.is_running:
-            log_error(log_message("already running."))
+            logger.error("already running.")
             return
 
         try:
@@ -60,7 +69,6 @@ class BinjaCodeModeMCP:
                 config,
                 tabs_provider=list_tabs,
                 bn_module=binaryninja,
-                log=log_info,
             )
             server = MCPHTTPServer(
                 MCPHandler(backend),
@@ -69,8 +77,8 @@ class BinjaCodeModeMCP:
                 api_key=config.api_key,
             )
             endpoint = server.start()
-        except Exception as e:
-            log_error(log_message(f"failed to start: {e}"))
+        except Exception:
+            logger.exception("failed to start")
             update_status(False)
             return
 
@@ -78,23 +86,26 @@ class BinjaCodeModeMCP:
         self._server = server
         self._backend = backend
 
-        log_info("=" * 66)
-        log_info("Code Mode MCP server started")
-        log_info(f"  Endpoint: {endpoint}")
-        log_info(f"  API key:  {config.api_key}")
-        log_info("")
-        log_info("  claude mcp add --transport http binja \\")
-        log_info(f"    {endpoint} \\")
-        log_info(f'    --header "Authorization: Bearer {config.api_key}"')
-        log_info("=" * 66)
+        logger.info(
+            "%s\nserver started\n  Endpoint: %s\n  API key:  %s\n\n"
+            "  claude mcp add --transport http binja \\\n"
+            "    %s \\\n"
+            '    --header "Authorization: Bearer %s"\n%s',
+            "=" * 66,
+            endpoint,
+            config.api_key,
+            endpoint,
+            config.api_key,
+            "=" * 66,
+        )
         update_status(True)
 
     def stop_server(self, bv: object = None) -> None:
         if self.is_shutting_down:
-            log_error(log_message("already shutting down."))
+            logger.error("already shutting down.")
             return
         if self._server is None:
-            log_error(log_message("not running."))
+            logger.error("not running.")
             return
 
         server = self._server
@@ -105,8 +116,8 @@ class BinjaCodeModeMCP:
                 server.stop()
                 if backend is not None:
                     backend.wait_for_idle()
-            except Exception as e:
-                log_error(log_message(f"error while stopping: {e}"))
+            except Exception:
+                logger.exception("error while stopping")
             finally:
                 # Keep both objects reachable until their work is gone. A
                 # timed-out execute request can finish before its script does.
@@ -115,7 +126,7 @@ class BinjaCodeModeMCP:
                     self._backend = None
                     self._config = None
                 self._shutdown_thread = None
-                log_info("Code Mode MCP server stopped.")
+                logger.info("server stopped.")
                 update_status(False)
 
         self._shutdown_thread = threading.Thread(
@@ -123,7 +134,7 @@ class BinjaCodeModeMCP:
             daemon=True,
             name="binja-mcp-shutdown",
         )
-        log_info("Code Mode MCP server shutting down.")
+        logger.info("server shutting down.")
         update_status(True, shutting_down=True)
         self._shutdown_thread.start()
 
@@ -136,8 +147,9 @@ class BinjaCodeModeMCP:
                 self._config.api_key,
                 self._backend.status().get("binaries", []),
             )
-        for line in report.splitlines():
-            log_info(line)
+        # The report is also returned as standalone display text, where it
+        # carries its own label. The logging handler supplies that label here.
+        logger.info("%s", report.removeprefix(LOG_PREFIX))
 
     def register_commands(self) -> None:
         # register_global, not register: the BinaryView-scoped variant hides

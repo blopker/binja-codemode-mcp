@@ -14,8 +14,10 @@ class _StubModule(types.ModuleType):
     __path__: list[str]
     PluginCommand: type
     log: types.ModuleType
+    log_debug: Callable[[str], None]
     log_error: Callable[[str], None]
     log_info: Callable[[str], None]
+    log_warn: Callable[[str], None]
     list_tabs: Callable[[], list[Any]]
     update_status: Callable[..., None]
 
@@ -34,8 +36,10 @@ def commands_module(monkeypatch):
         {"register_global": staticmethod(lambda *args, **kwargs: None)},
     )
     log = _StubModule("binaryninja.log")
+    log.log_debug = infos.append
     log.log_error = errors.append
     log.log_info = infos.append
+    log.log_warn = errors.append
     binaryninja.log = log
 
     uicontext = _StubModule("binja_codemode_mcp.plugin.uicontext")
@@ -114,4 +118,4 @@ def test_shutdown_retains_the_backend_and_refuses_restart(commands_module):
     assert plugin._backend is None
     assert plugin._config is None
     assert statuses[-1] == (False, False)
-    assert infos[-1] == "Code Mode MCP server stopped."
+    assert infos[-1] == "Code Mode MCP: server stopped."

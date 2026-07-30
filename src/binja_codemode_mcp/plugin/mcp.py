@@ -415,7 +415,10 @@ class MCPHandler:
         raise MCPError(-32602, f"Unknown resource: {uri}")
 
 
-_HEAD_NOTE = "\n... (truncated here; rerun a narrower script or print a smaller slice)"
+_HEAD_NOTE = (
+    "\n... (truncated here; rerun with output_directory and output_extension "
+    "for complete output, or print a smaller slice)"
+)
 _TAIL_NOTE = "... (truncated; earlier lines were dropped)\n"
 _ERROR_PREFIX = "\nError: "
 _ROLLBACK_NOTE = "\n(Rolled back: any changes this script made are gone.)"

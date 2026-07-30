@@ -6,10 +6,10 @@ the real thing, and all three degrade to None without it.
 """
 
 import ast
-import contextlib
 import dis
 import inspect
 import linecache
+import logging
 import threading
 import types
 from collections.abc import Callable
@@ -28,12 +28,13 @@ from .executor import (
     publish_source,
 )
 from .guide import render
-from .logging import log_message
+from .logging import LOG_PREFIX
 from .session import BinarySession, BinaryTab, same_view
 
 # Supplied fresh on every call, so a saved function must never carry the
 # defining call's copies of these.
 LIVE_GLOBALS = ("__name__", "bv", "bn", "h", "print", TIMEOUT_CHECK_GLOBAL)
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -486,10 +487,8 @@ class PluginBackend:
         tabs_provider: Callable[[], list[BinaryTab]],
         bn_module: Any = None,
         watcher_factory: Callable[[Any], Any] | None = None,
-        log: Callable[[str], None] | None = None,
     ) -> None:
         self.config = config
-        self.log = log
         self.session = BinarySession(tabs_provider)
         self.helpers = Helpers(self.session)
         self.executor = CodeExecutor(
@@ -506,7 +505,7 @@ class PluginBackend:
 
     def define_lib_function(self, source: str) -> str:
         result = self.helpers.lib._define(source)
-        self._log(result)
+        logger.info(result)
         return result
 
     def list_lib_functions(self) -> str:
@@ -514,7 +513,7 @@ class PluginBackend:
 
     def remove_lib_function(self, name: str) -> str:
         result = self.helpers.lib._remove(name)
-        self._log(result)
+        logger.info(result)
         return result
 
     def execute(
@@ -557,7 +556,7 @@ class PluginBackend:
         try:
             tab = self.session.resolve(target)
         except LookupError as e:
-            self._log(f"refused — {e}")
+            logger.warning("refused — %s", e)
             return ExecutionResult(success=False, output="", error=str(e))
 
         artifact_spec: ArtifactSpec | None = None
@@ -565,7 +564,7 @@ class PluginBackend:
             error = (
                 "`output_directory` and `output_extension` must be provided together."
             )
-            self._log(f"refused — {error}")
+            logger.warning("refused — %s", error)
             return ExecutionResult(success=False, output="", error=error)
         if output_directory is not None and output_extension is not None:
             try:
@@ -577,7 +576,7 @@ class PluginBackend:
                     target_id=self.session.identifier(tab) or "binary",
                 )
             except ValueError as e:
-                self._log(f"refused — {e}")
+                logger.warning("refused — %s", e)
                 return ExecutionResult(success=False, output="", error=str(e))
 
         # The log is where the user watches what is being done to their
@@ -586,7 +585,7 @@ class PluginBackend:
         # no trace at all.
         said = f" — {description}" if description else ""
         mode = "querying" if read_only else "running"
-        self._log(f"{mode} on {tab.name}{said}")
+        logger.info("%s on %s%s", mode, tab.name, said)
 
         def on_call(scope: dict[str, Any], batch: Batch) -> None:
             self.helpers.bind_call(scope, batch, tab)
@@ -611,14 +610,8 @@ class PluginBackend:
             verdict = "ok, rolled back" if read_only else "ok"
         else:
             verdict = "failed" + (", rolled back" if result.reverted else "")
-        self._log(f"{verdict} in {result.elapsed_s:.1f}s")
+        logger.info("%s in %.1fs", verdict, result.elapsed_s)
         return result
-
-    def _log(self, message: str) -> None:
-        if self.log is None:
-            return
-        with contextlib.suppress(Exception):  # logging must never take a call down
-            self.log(log_message(message))
 
     def running_script(self) -> tuple[str | None, float] | None:
         """A script in flight, for the status indicator to warn about."""
@@ -666,13 +659,13 @@ def render_status_report(
     """
     if endpoint is None:
         return (
-            f"{log_message('NOT RUNNING')}\n\n"
+            f"{LOG_PREFIX}NOT RUNNING\n\n"
             "Start it from Plugins > Code Mode MCP > Start Server, "
             "or click the indicator in the status bar."
         )
 
     lines = [
-        log_message("RUNNING"),
+        f"{LOG_PREFIX}RUNNING",
         "",
         f"  Endpoint: {endpoint}",
         f"  API key:  {api_key}",

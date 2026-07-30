@@ -543,7 +543,8 @@ class TestResponseBudget:
         text = _text(handler, success=True, output="FIRST\n" + "x" * 200_000 + "\nLAST")
         assert text.startswith("FIRST")
         assert "LAST" not in text
-        assert "narrower script" in text
+        assert "output_directory" in text
+        assert "output_extension" in text
 
     def test_the_timing_footer_survives_truncation(self, handler):
         text = _text(

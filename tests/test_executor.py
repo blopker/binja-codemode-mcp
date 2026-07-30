@@ -491,6 +491,8 @@ class TestOutput:
         result = executor.execute("print('x' * 500)", target=bv)
         assert len(result.output) < 500
         assert "truncated" in result.output
+        assert "output_directory" in result.output
+        assert "output_extension" in result.output
 
     def test_one_huge_write_retains_only_the_cap(self):
         """The old collector appended the complete string before checking its
