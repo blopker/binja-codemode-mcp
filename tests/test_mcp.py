@@ -274,7 +274,7 @@ class TestTools:
             "result"
         ]["content"][0]["text"]
         assert text.startswith("line one\n")
-        assert text.rstrip().endswith("[2.5s of 30s]")
+        assert text.rstrip().endswith("[2.5s of 30s | h.lib: none]")
 
     def test_artifact_metadata_follows_the_preview(self, handler):
         text = _text(
@@ -314,13 +314,13 @@ class TestTools:
             timeout_s=30.0,
             lib=("unported", "port_types"),
         )
-        assert text.rstrip().endswith("[1.0s of 30s | lib: unported, port_types]")
+        assert text.rstrip().endswith("[1.0s of 30s | h.lib: unported, port_types]")
 
-    def test_no_library_section_when_nothing_is_saved(self, handler):
+    def test_empty_library_is_still_advertised(self, handler):
         text = _text(
             handler, success=True, output="ok\n", elapsed_s=1.0, timeout_s=30.0
         )
-        assert text.rstrip().endswith("[1.0s of 30s]")
+        assert text.rstrip().endswith("[1.0s of 30s | h.lib: none]")
 
     def test_a_large_library_cannot_crowd_out_the_result(self, handler):
         text = _text(
@@ -333,11 +333,11 @@ class TestTools:
         )
         assert len(text.encode()) <= MAX_RESULT_BYTES
         assert "more]" in text
-        assert "lib: name0, name1" in text
+        assert "h.lib: name0, name1" in text
 
     def test_one_absurd_name_does_not_empty_the_listing(self, handler):
         """Counting the name before deciding whether it fits returned a bare
-        `lib: , +1 more` — a library the model is told about but cannot see."""
+        `h.lib: , +1 more` — a library the model is told about but cannot see."""
         text = _text(
             handler,
             success=True,
@@ -346,7 +346,7 @@ class TestTools:
             timeout_s=30.0,
             lib=("z" * 500,),
         )
-        assert "lib: zzz" in text
+        assert "h.lib: zzz" in text
 
     def test_the_target_reaches_the_backend(self, handler, backend):
         """It decides which database is written to, so it must not be dropped
@@ -620,7 +620,7 @@ class TestResponseBudget:
             elapsed_s=1.4,
             timeout_s=30.0,
         )
-        assert text.rstrip().endswith("[1.4s of 30s]")
+        assert text.rstrip().endswith("[1.4s of 30s | h.lib: none]")
 
     def test_a_script_that_filled_its_output_then_raised_shows_both(self, handler):
         text = _text(

@@ -580,9 +580,8 @@ def _footer(elapsed: float, budget: float | None, lib: tuple[str, ...] = ()) -> 
     nobody can see is one the model re-derives or wrongly trusts.
     """
     timing = f"{elapsed:.1f}s of {budget:.0f}s" if budget else f"{elapsed:.1f}s"
-    if not lib:
-        return f"\n\n[{timing}]"
-    return f"\n\n[{timing} | lib: {_lib_names(lib)}]"
+    names = _lib_names(lib) if lib else "none"
+    return f"\n\n[{timing} | h.lib: {names}]"
 
 
 def _artifact_note(result: Any) -> str:

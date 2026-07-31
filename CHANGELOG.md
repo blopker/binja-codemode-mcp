@@ -91,7 +91,8 @@ A rewrite.
   instead of unbounded. Output keeps its head, a traceback keeps its tail *and* its first
   line, so the exception type survives however large its message.
 - **Failures say whether the database was rolled back**, and a timing footer (`[1.4s of
-  30s]`) gives the throughput signal needed to size a batch against the 30-second limit.
+  30s | h.lib: none]`) gives the throughput signal needed to size a batch and keeps the
+  reusable function library visible even while it is empty.
 - **Tracebacks quote the line that raised**, rather than giving a line number into code the
   model has to remember.
 - **Status-bar controls** start and stop the server with no file open, warn while scripts
