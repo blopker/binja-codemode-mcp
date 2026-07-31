@@ -139,3 +139,12 @@ def test_initialization_is_marshaled_to_the_main_thread(widget_module, monkeypat
 
     assert initialized == [plugin]
     assert len(main_thread_calls) == 1
+
+
+def test_timed_out_native_call_has_distinct_status(widget_module):
+    module, _unregistered, _main_thread_calls = widget_module
+    script = ("firmware", 42.0, True)
+    assert "timed out" in module._get_status_text(True, script)
+    tooltip = module._get_status_tooltip(script)
+    assert "native code" in tooltip
+    assert "loaded views" in tooltip

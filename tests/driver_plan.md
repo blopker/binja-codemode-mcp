@@ -134,8 +134,8 @@ cap dropped from 100 KB to 32 KB because 100 KB was being spilled and never read
 collision: two quick calls issued together should **both succeed**, because a second call
 waits a few seconds for the first rather than being refused outright. Then the real case —
 one call that renames the entry function to `driver_timeout_probe` then `time.sleep(45)`.
-While it sleeps, send a second call: expect it to wait, then report that a script is still
-running *and name the binary it is running on*, not to hang. Expect the first to
+While it sleeps, send a second call: expect it to wait, then report that the first script
+timed out but is still active *and name its target*, not to hang. Expect the first to
 time out at ~30s saying the batch was discarded. Wait ~20s, then read the name back: expect
 the **original**. `driver_timeout_probe` surviving means an abandoned script committed
 after its call had already reported failure.
@@ -147,13 +147,19 @@ endpoint still serving. The large error is the gap that let an unbounded traceba
 
 **D4 — a removed function stays removed.** `remove_user_function`, not `remove_function`:
 the latter is an auto-level action analysis undoes. Remove a real function, check
-`get_function_at` is `None`, `update_analysis_and_wait()`, check again. Expect `True` both
-times, then `bv.undo()` and confirm it returns.
+`get_function_at` is `None`, call `update_analysis()`, then check again in a later call.
+Expect `True` both times, then `bv.undo()` and confirm it returns.
 
 Then check what the undo cost: count `is_var_user_defined` across the restored function.
 Undoing a removal is known to leave two `void*` arguments falsely flagged, permanently.
 Confirm the guide's warning still matches what you see, and report if the count is anything
 other than two.
+
+**D5 — script-created views are owned by the call.** Run
+`v = bn.load(bv.file.original_filename, update_analysis=False); print(v.view_type)`
+without closing `v`. Expect success, no additional binary in `h.binaries()`, and no new
+or duplicated startup tab in the UI. A direct `bv.update_analysis_and_wait()` must be
+refused before execution and point to `update_analysis()`.
 
 ## E. Guidance quality
 
@@ -220,8 +226,8 @@ Ask for all of this in one message, then stop.
    binary, then its verdict and elapsed time. Ask whether the failures said "rolled back".
 5. While a script is running, do **not** edit the database — a failed script reverts to
    where its transaction opened and would take your edit with it. The status bar says
-   `⚠️ MCP: running script Ns. Do not edit` while one holds it; D2 runs for 30 seconds, so
-   confirm the warning appears and then leave it alone.
+   `⚠️ MCP: timed out; native call active Ns` after D2 times out but its sleep is
+   still active; confirm the state changes and then leave it alone.
 
 ## F. After the Checkpoint
 

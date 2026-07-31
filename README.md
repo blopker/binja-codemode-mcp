@@ -86,11 +86,14 @@ Images Binary Ninja marks non-relocatable require `allow_non_relocatable=true`.
 | Name | Value |
 |---|---|
 | `bv` | The `BinaryView` selected by `target` |
-| `bn` | The `binaryninja` module |
+| `bn` | The `binaryninja` API; `bn.load` is call-owned |
 | `h` | `binaries()`, `read_only_view(name)`, and read-only `lib` |
 
-Builtins, imports, and filesystem access work. Return data with `print()`. Calls time
-out after 30 seconds; results include a 32 KB preview and retain 4 KB of errors.
+Builtins, imports, and filesystem access work. Return data with `print()`. Calls return
+after 30 seconds; native calls cannot be killed and may keep the server busy while they
+unwind. Results include a 32 KB preview and retain 4 KB of errors. Direct
+`update_analysis_and_wait()` is refused; use `update_analysis()` and inspect later.
+`bn.load` requires `update_analysis=False`, and its view closes when the call finishes.
 
 For complete output, pass an existing absolute `output_directory` and an
 `output_extension` of 1–16 letters or digits. The server streams up to 100 MiB into
@@ -146,8 +149,9 @@ other local software.
 
 Submitted code runs inside Binary Ninja with your user permissions. There is
 deliberately no sandbox: Python can read files, import modules, and start processes.
-Undo transactions protect Binary Ninja database edits, not the filesystem or other
-side effects. Connect only trusted clients.
+Undo transactions protect managed BinaryViews, not files, subprocesses, imported
+modules, or views opened by bypassing the injected `bn.load`. Connect only trusted
+clients.
 
 ## Development
 

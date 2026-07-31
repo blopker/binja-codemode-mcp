@@ -9,12 +9,13 @@ import ast
 import contextlib
 import itertools
 import linecache
+import logging
 import threading
 import time
 import traceback
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 
 from .artifact import WRITE_CHARS, ArtifactSink, ArtifactSpec
 from .session import same_view
@@ -26,13 +27,14 @@ from .session import same_view
 SCRIPT_PREFIX = "<mcp:"
 TIMEOUT_CHECK_GLOBAL = "__binja_mcp_check_timeout__"
 # How long an interrupted script is given to unwind and revert before the caller
-# stops waiting. Guarded Python raises at the next loop iteration or function
-# entry and settles immediately, so this only has to cover the unwind. A thread
+# stops waiting. Guarded Python raises at the next statement boundary and settles
+# immediately, so this only has to cover the unwind. A thread
 # still blocked in a C call cannot see the check yet.
 INTERRUPT_GRACE_S = 0.1
 KEEP_SOURCES = 8  # recent scripts whose text stays available
 _call_seq = itertools.count(1)
 _source_lock = threading.Lock()
+logger = logging.getLogger(__name__)
 
 
 def next_script_name() -> str:
@@ -79,6 +81,16 @@ class _UnsafeCallCheck(ast.NodeVisitor):
     def visit_Call(self, node: ast.Call) -> None:
         if (
             isinstance(node.func, ast.Attribute)
+            and node.func.attr == "update_analysis_and_wait"
+        ):
+            raise ScriptRejected(
+                "Do not call update_analysis_and_wait() from execute: Binary "
+                "Ninja blocks in native code, where the 30-second timeout cannot "
+                "interrupt it. Call update_analysis() and inspect results in a "
+                "later MCP call."
+            )
+        if (
+            isinstance(node.func, ast.Attribute)
             and node.func.attr == "rebase"
             and isinstance(node.func.value, ast.Name)
             and node.func.value.id == "bv"
@@ -91,7 +103,7 @@ class _UnsafeCallCheck(ast.NodeVisitor):
 
 
 class _GuardCheckpoints(ast.NodeTransformer):
-    """Add cooperative timeout checks at loop iterations and function entry."""
+    """Add a cooperative timeout check before every Python statement."""
 
     @staticmethod
     def _check(node: ast.AST) -> ast.Expr:
@@ -104,35 +116,21 @@ class _GuardCheckpoints(ast.NodeTransformer):
         )
         return ast.copy_location(check, node)
 
-    def visit_While(self, node: ast.While) -> ast.While:
-        self.generic_visit(node)
-        node.body.insert(0, self._check(node))
-        return node
-
-    def visit_For(self, node: ast.For) -> ast.For:
-        self.generic_visit(node)
-        node.body.insert(0, self._check(node))
-        return node
-
-    def visit_AsyncFor(self, node: ast.AsyncFor) -> ast.AsyncFor:
-        self.generic_visit(node)
-        node.body.insert(0, self._check(node))
-        return node
-
-    def visit_FunctionDef(self, node: ast.FunctionDef) -> ast.FunctionDef:
-        self.generic_visit(node)
-        # The first string expression defines __doc__; putting a checkpoint
-        # before it would silently erase the function's docstring.
-        index = 1 if _starts_with_docstring(node.body) else 0
-        node.body.insert(index, self._check(node))
-        return node
-
-    def visit_AsyncFunctionDef(
-        self, node: ast.AsyncFunctionDef
-    ) -> ast.AsyncFunctionDef:
-        self.generic_visit(node)
-        index = 1 if _starts_with_docstring(node.body) else 0
-        node.body.insert(index, self._check(node))
+    def generic_visit(self, node: ast.AST) -> ast.AST:
+        super().generic_visit(node)
+        for field_name, value in ast.iter_fields(node):
+            if not value or not isinstance(value, list):
+                continue
+            if not all(isinstance(item, ast.stmt) for item in value):
+                continue
+            statements = cast(list[ast.stmt], value)
+            guarded: list[ast.stmt] = []
+            for index, statement in enumerate(statements):
+                if index == 0 and _starts_with_docstring(statements):
+                    guarded.append(statement)
+                else:
+                    guarded.extend((self._check(statement), statement))
+            setattr(node, field_name, guarded)
         return node
 
 
@@ -190,6 +188,68 @@ class _Outcome:
     settling: bool = False  # the script finished; transactions are closing
     settled: bool = False  # the worker closed its transactions and is done
     finalize_lock: threading.Lock = field(default_factory=threading.Lock)
+
+
+class _LoadedViews:
+    """Views created through this call's injected ``bn.load``."""
+
+    def __init__(self) -> None:
+        self._views: list[Any] = []
+        self._lock = threading.Lock()
+
+    def add(self, view: Any) -> Any:
+        with self._lock:
+            self._views.append(view)
+        return view
+
+    def abort_analysis(self) -> None:
+        with self._lock:
+            views = list(self._views)
+        for view in views:
+            with contextlib.suppress(Exception):
+                view.abort_analysis()
+
+    def close(self) -> list[str]:
+        with self._lock:
+            views, self._views = self._views, []
+        failures: list[str] = []
+        for view in reversed(views):
+            try:
+                _ = view.view_type
+            except Exception:
+                continue  # already closed by a `with bn.load(...)` block
+            try:
+                view.file.close()
+            except Exception as e:
+                failures.append(f"{type(e).__name__}: {e}")
+        return failures
+
+
+class _BinaryNinjaFacade:
+    """The real module, with call-owned and non-analyzing ``load``."""
+
+    def __init__(self, module: Any, loaded: _LoadedViews) -> None:
+        self._module = module
+        self._loaded = loaded
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._module, name)
+
+    def __str__(self) -> str:
+        return str(self._module)
+
+    def __repr__(self) -> str:
+        return repr(self._module)
+
+    def load(self, *args: Any, **kwargs: Any) -> Any:
+        update_analysis = args[1] if len(args) > 1 else kwargs.get("update_analysis")
+        if update_analysis is not False:
+            raise ValueError(
+                "bn.load() inside execute requires update_analysis=False; its "
+                "default waits in native code without an enforceable timeout. "
+                "The loaded view is closed automatically when the call finishes."
+            )
+        return self._loaded.add(self._module.load(*args, **kwargs))
 
 
 class _Budget:
@@ -449,6 +509,7 @@ class CodeExecutor:
         self._busy = threading.Lock()
         self._started_at: float | None = None
         self._running_target: str | None = None
+        self._timed_out = False
         self._idle = threading.Event()
         self._idle.set()
 
@@ -459,12 +520,14 @@ class CodeExecutor:
             raise ExecutorBusyError(self._busy_message())
         self._started_at = time.time()
         self._running_target = target_name
+        self._timed_out = False
         self._idle.clear()
         try:
             yield
         finally:
             self._started_at = None
             self._running_target = None
+            self._timed_out = False
             self._idle.set()
             self._busy.release()
 
@@ -473,10 +536,15 @@ class CodeExecutor:
         running_for = time.time() - started_at if started_at else 0.0
         on = self._running_target
         whose = f" on {on}" if on else ""
+        if self._timed_out:
+            state = "timed out and is still inside a native call"
+        else:
+            state = "is still running"
         return (
-            f"Waited {self.queue_wait:.0f}s, but a previous operation is still "
-            f"running{whose} ({running_for:.0f}s so far). Wait for it, or restart "
-            "Binary Ninja if it is wedged."
+            f"Waited {self.queue_wait:.0f}s, but a previous operation {state}"
+            f"{whose} ({running_for:.0f}s so far). All calls serialize until its "
+            "resources and transactions close; wait, or restart Binary Ninja if "
+            "it is wedged."
         )
 
     def execute(
@@ -527,6 +595,7 @@ class CodeExecutor:
         # refused for the life of the process.
         started = time.time()
         outcome = _Outcome()
+        loaded_views = _LoadedViews()
         artifact: ArtifactSink | None = None
         output: _CapturedOutput | None = None
         batch = Batch(
@@ -540,6 +609,7 @@ class CodeExecutor:
             publish_source(script_name, code)
             self._started_at = started
             self._running_target = target_name
+            self._timed_out = False
             self._idle.clear()
 
             def captured_print(*args: Any, **kwargs: Any) -> None:
@@ -566,7 +636,7 @@ class CodeExecutor:
             scope: dict[str, Any] = {
                 "__name__": "__binja_mcp__",
                 "bv": target,
-                "bn": bn,
+                "bn": _BinaryNinjaFacade(bn, loaded_views) if bn is not None else None,
                 "h": helpers,
                 "print": captured_print,
                 TIMEOUT_CHECK_GLOBAL: check_timeout,
@@ -581,6 +651,7 @@ class CodeExecutor:
                     output.discard()
             self._started_at = None
             self._running_target = None
+            self._timed_out = False
             self._idle.set()
             self._busy.release()
             return ExecutionResult(
@@ -637,6 +708,15 @@ class CodeExecutor:
                         f"{outcome.error}\n\n{failure}" if outcome.error else failure
                     )
             finally:
+                cleanup_failures = loaded_views.close()
+                if cleanup_failures:
+                    note = "Failed to close view(s) created by bn.load(): " + "; ".join(
+                        cleanup_failures
+                    )
+                    logger.error("%s", note)
+                    outcome.error = (
+                        f"{outcome.error}\n\n{note}" if outcome.error else note
+                    )
                 # Artifact publication and the settled flag share a lock with
                 # timeout finalization, so a response cannot race a successful
                 # rename and misreport it as timed out.
@@ -673,8 +753,15 @@ class CodeExecutor:
                     # Set before releasing the lock: the caller reads `settled`
                     # to decide whether a script that outran the deadline landed.
                     outcome.settled = True
+                if outcome.abandoned:
+                    logger.info(
+                        "timed-out script on %s released its resources after %.1fs",
+                        target_name,
+                        time.time() - started,
+                    )
                 self._started_at = None
                 self._running_target = None
+                self._timed_out = False
                 self._idle.set()
                 self._busy.release()
 
@@ -686,6 +773,7 @@ class CodeExecutor:
                 output.discard()
             self._started_at = None
             self._running_target = None
+            self._timed_out = False
             self._idle.set()
             self._busy.release()
             return ExecutionResult(
@@ -705,6 +793,11 @@ class CodeExecutor:
             with outcome.finalize_lock:
                 if not outcome.settled:
                     outcome.abandoned = True
+                    self._timed_out = True
+                    # Best effort for script-owned views blocked in native
+                    # analysis. The next statement checkpoint prevents any
+                    # later operation from running after the call returns.
+                    loaded_views.abort_analysis()
                     try:
                         output.finish(success=False)
                     except BaseException as e:
@@ -712,8 +805,8 @@ class CodeExecutor:
                             f"Failed to finalize artifact output: "
                             f"{type(e).__name__}: {e}"
                         )
-            # A loop or function checkpoint sees `abandoned` at its next safe
-            # point. Give ordinary Python a moment to unwind and revert.
+            # A statement checkpoint sees `abandoned` at its next safe point.
+            # Give ordinary Python a moment to unwind and revert.
             if not outcome.settling:
                 thread.join(timeout=INTERRUPT_GRACE_S)
             elapsed = time.time() - started
@@ -774,7 +867,7 @@ class CodeExecutor:
             **output.artifact_fields(),
         )
 
-    def running_script(self) -> tuple[str | None, float] | None:
+    def running_script(self) -> tuple[str | None, float, bool] | None:
         """The script in flight and how long it has run, or None when idle.
 
         Polled from the Qt main thread by the status indicator, so it must not
@@ -784,7 +877,11 @@ class CodeExecutor:
         started = self._started_at
         if started is None:
             return None
-        return (self._running_target, max(0.0, time.time() - started))
+        return (
+            self._running_target,
+            max(0.0, time.time() - started),
+            self._timed_out,
+        )
 
     def wait_for_idle(self, timeout: float | None = None) -> bool:
         """Block until no script is running. For tests and orderly shutdown."""

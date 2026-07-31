@@ -4,14 +4,17 @@
 
 - Change only what evidence supports; put uncertainty in a comment.
 - Each call is one undo transaction on `target`; an exception rolls it back.
-- Calls time out after 30 seconds. Filter, split large jobs, and use the timing footer.
+- Calls return after 30 seconds. Native code cannot be killed; while it unwinds the
+  UI says timed out and other calls wait. Never use `update_analysis_and_wait()`;
+  call `update_analysis()` and inspect results later.
 - `print()` returns 32 KB; errors keep their last 4 KB. Complete output needs an
   absolute `output_directory` and alphanumeric `output_extension`; it streams at
   most 100 MiB to a generated `.partial`, renamed `.failed` on error. Print
   addresses as hex.
 - Do not call Qt, `binaryninjaui`, or `PySide6`: scripts run off the GUI thread.
 - Do not use handed views as a context manager; exiting closes the user's view.
-  A view opened by `bn.load(path)` is yours and may use `with`.
+  `bn.load()` requires `update_analysis=False`; its view closes at call end.
+- Undo does not cover files created by a script.
 - A rollback also rewinds GUI edits made after the call began.
 
 ## Environment
@@ -27,13 +30,7 @@ queries; all views roll back and analysis/cache notifications are ignored.
 - Normal Python, imports, and filesystem access work. Use `bv.read(address, length)`
   for mapped bytes; `bv.file.original_filename` names the original file.
 
-Select functions before decompiling:
-
-```python
-hits = [f for f in bv.functions if "parse" in f.name]
-for f in hits[:10]:
-    print(hex(f.start), f.name)
-```
+Filter `bv.functions` by name, address, or references before decompiling a few.
 
 ## Address layout
 
@@ -44,8 +41,7 @@ BNDB, writes a timestamped sibling backup, may reanalyze, and verifies the resul
 Non-relocatable images need `allow_non_relocatable=true`; prefer `bv.memory_map`
 for raw firmware. A region maps data; a section only labels mapped addresses. For
 a header, read payload bytes from `bv.file.raw` at their file offset and add a
-region at the virtual base. Changes support undo and persist; legacy auto-segment
-removal may not.
+region at the virtual base. Changes support undo and persist; legacy removal may not.
 
 `bv.entry_point` is the loader entry; user entries are in `bv.entry_functions` and
 added with `bv.add_entry_point(addr)`. `bv.modified` reports unsaved changes,
@@ -146,13 +142,13 @@ enclosing variable. After redefining a range, check for stale interior symbols.
 
 ## Functions
 
-Assign a declaration string to set both the name and prototype, then refresh analysis:
+Assign a declaration string to set both name and prototype, then request analysis:
 
 ```python
 f = bv.get_function_at(addr)
 f.type = "uint32_t parse_record(const uint8_t *data, uint16_t length);"
-bv.update_analysis_and_wait()
-print(f.name, f.type)
+bv.update_analysis()
+# Verify f.name and f.type in a later call after analysis completes.
 ```
 
 Assigning a `Type` object changes only the prototype; set `f.name` separately.
@@ -198,15 +194,9 @@ Check `f.vars`; `f.parameter_vars` contains only arguments.
 
 ## Saved functions
 
-Calls share no variables or imports. Pass one complete definition to
-`define_lib_function`:
-
-```python
-def named(view):
-    return [(f.start, f.name) for f in view.functions if not f.symbol.auto]
-```
-
-Call `h.lib.named(bv)` from `execute`; the namespace is read-only. Definitions use
+Calls share no variables or imports. Pass one complete `def` to
+`define_lib_function`, then call it as `h.lib.name(bv)` from `execute`; the namespace
+is read-only. Definitions use
 that call's globals. Put imports and helpers inside, pass other values, and use
 immutable literal defaults. Annotations are not retained. Inspect with
 `list_lib_functions`, delete with `remove_lib_function`. Calls to `h.lib.other()`
@@ -214,5 +204,5 @@ resolve dynamically; removing `other` makes its caller fail normally.
 
 ## Verification
 
-Read edits back and inspect IL. For tables, check width, count, stride, padding,
-and boundaries. Verify comments with `bv.get_comment_at(addr)`.
+Read edits and IL back. Check table width, count, stride, and boundaries; comments
+use `bv.get_comment_at(addr)`.

@@ -40,12 +40,13 @@ EXECUTE_DESCRIPTION = """\
 Run Python with `bv` (the selected `target` BinaryView), `bn` (binaryninja), and
 `h` (`binaries()`, `read_only_view(name)`, read-only `lib`). Builtins and imports work.
 
-An exception rolls back the call; `read_only=true` always rolls it back. The limit
-is 30 seconds. Return data with `print()` (32 KB preview; errors keep 4 KB);
+An exception rolls back managed views, not files; `read_only=true` always rolls back.
+Calls return after 30 seconds, but native code may remain busy while unwinding. Return
+data with `print()` (32 KB preview; errors keep 4 KB);
 `output_directory` plus `output_extension` streams up to 100 MiB to a generated
-file. Filter before decompiling and print addresses as hex. Calls are stateless
-except functions managed by the lib tools and called as `h.lib.name()`. Read
-`binja_guide` before non-trivial work."""
+file. `bn.load` requires `update_analysis=False` and closes its view at call end.
+Filter before decompiling and print addresses as hex. Calls are otherwise stateless.
+Read `binja_guide` before non-trivial work."""
 
 GUIDE_DESCRIPTION = """\
 Return live session details and concise guidance for safe queries and edits."""

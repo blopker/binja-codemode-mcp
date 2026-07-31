@@ -252,9 +252,10 @@ class TestRunningScript:
         worker.join(5)
 
         assert live is not None, "the indicator had nothing to warn about"
-        target, elapsed = live
+        target, elapsed, timed_out = live
         assert target == "ls-a"
         assert 0.0 < elapsed < 5.0
+        assert not timed_out
         assert backend.running_script() is None, "cleared once the script ends"
 
 

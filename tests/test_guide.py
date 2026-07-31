@@ -180,6 +180,15 @@ class TestGuideContent:
         text = guide_text()
         assert "30 seconds" in text
         assert "exception rolls it back" in text
+        assert "Native code cannot be killed" in text
+        assert "update_analysis()" in text
+
+    def test_documents_owned_loaded_views_and_external_side_effects(self):
+        text = guide_text()
+        assert "bn.load()" in text
+        assert "update_analysis=False" in text
+        assert "view closes at call end" in text
+        assert "Undo does not cover files" in text
 
     def test_covers_the_idioms_a_live_run_had_to_discover(self):
         """Each of these cost round trips in a real session."""

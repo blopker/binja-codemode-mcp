@@ -41,7 +41,9 @@ def _get_status_text(running: bool, script=None, *, shutting_down: bool = False)
     if shutting_down:
         return "🟡 MCP: Shutting down..."
     if script is not None:
-        _target, elapsed = script
+        _target, elapsed, timed_out = script
+        if timed_out:
+            return f"⚠️ MCP: timed out; native call active {elapsed:.0f}s"
         return f"⚠️ MCP: running script {elapsed:.0f}s. Do not edit"
     if running:
         return "🟢 MCP: Running"
@@ -53,8 +55,13 @@ def _get_status_tooltip(script=None, *, shutting_down: bool = False) -> str:
         return "Waiting for active MCP work to finish before stopping"
     if script is None:
         return "Click to start/stop MCP server"
-    target, _elapsed = script
+    target, _elapsed, timed_out = script
     where = f" against {target}" if target else ""
+    if timed_out:
+        return (
+            f"A timed-out script is still inside native code{where}.\n"
+            "The server is waiting to close its transactions and loaded views."
+        )
     return (
         f"A script is running{where}.\n"
         "Edits you make now will be rolled back with it if it fails."

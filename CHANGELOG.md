@@ -24,6 +24,13 @@ A rewrite.
 - **`print()` output was prefixed with a timestamp**, corrupting output the model parses.
 - Accidental infinite Python loops and recursion now stop cooperatively at inserted
   checkpoints. Timeout checks cannot interrupt transaction bookkeeping.
+- Timeout checkpoints now cover every statement boundary, so code after an overlong
+  native call cannot run when that call returns. Direct `update_analysis_and_wait()` is
+  refused, and the status bar distinguishes a returned timeout from native work still
+  unwinding.
+- Views returned by the injected `bn.load` require `update_analysis=False`, are aborted
+  after timeout, and close when the call actually finishes instead of leaking analysis
+  threads and UI state.
 - Read-only secondary views always roll back, including mutations Binary Ninja does not
   report through notifications.
 - Server shutdown drains accepted requests and lingering execution before allowing a

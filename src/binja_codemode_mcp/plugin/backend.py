@@ -190,7 +190,10 @@ class _Library:
             compiled = compile_script(source, origin, defer_annotations=True)
         except SyntaxError as e:
             raise ValueError(f"Syntax error: {e.msg} (line {e.lineno}).") from None
-        defining: dict[str, Any] = {"__name__": "__binja_mcp__"}
+        defining: dict[str, Any] = {
+            "__name__": "__binja_mcp__",
+            TIMEOUT_CHECK_GLOBAL: lambda: None,
+        }
         exec(compiled, defining, defining)
         fn = defining[node.name]
         fn.__annotations__ = {}
@@ -697,7 +700,7 @@ class PluginBackend:
         logger.info("%s in %.1fs", verdict, result.elapsed_s)
         return result
 
-    def running_script(self) -> tuple[str | None, float] | None:
+    def running_script(self) -> tuple[str | None, float, bool] | None:
         """A script in flight, for the status indicator to warn about."""
         return self.executor.running_script()
 

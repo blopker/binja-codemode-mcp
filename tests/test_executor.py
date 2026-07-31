@@ -125,6 +125,21 @@ class TestTimeout:
         assert bv.reverted == 1
         assert bv.committed == 0
 
+    def test_no_statement_after_a_late_native_call_runs(self, bv):
+        import threading
+
+        gate = threading.Event()
+        executor = CodeExecutor(timeout=0.05)
+        result = executor.execute(
+            "gate.wait(5)\nbv.rename('must_not_run')",
+            target=bv,
+            extra={"gate": gate},
+        )
+        assert result.timed_out
+        gate.set()
+        assert executor.wait_for_idle(timeout=3)
+        assert bv.renames == []
+
     def test_a_second_call_is_refused_while_one_is_still_running(self, bv):
         """Two open undo transactions on one database interleave
         unpredictably, so overlap is refused rather than risked."""
@@ -136,11 +151,23 @@ class TestTimeout:
 
         second = executor.execute("bv.rename('other')", target=bv)
         assert not second.success
-        assert "still running" in (second.error or "")
+        assert "timed out" in (second.error or "")
         assert bv.renames == []
 
         gate.set()
         executor.wait_for_idle(timeout=5)
+
+    def test_status_distinguishes_a_timed_out_native_call(self, bv):
+        import threading
+
+        gate = threading.Event()
+        executor = CodeExecutor(timeout=0.05)
+        result = executor.execute("gate.wait(5)", target=bv, extra={"gate": gate})
+        assert result.timed_out
+        live = executor.running_script()
+        assert live is not None and live[2] is True
+        gate.set()
+        assert executor.wait_for_idle(timeout=3)
 
 
 class TestSettleContract:
@@ -243,6 +270,92 @@ class TestSettleContract:
         )
         assert result.success
         assert other.reverted == 1
+
+
+class TestLoadedViewOwnership:
+    class File:
+        def __init__(self, owner):
+            self.owner = owner
+
+        def close(self):
+            self.owner.closed = True
+
+    class View:
+        def __init__(self):
+            import threading
+
+            self._view_type = "Mapped"
+            self.closed = False
+            self.aborted = False
+            self.release = threading.Event()
+            self.file = TestLoadedViewOwnership.File(self)
+
+        @property
+        def view_type(self):
+            if self.closed:
+                raise RuntimeError("closed")
+            return self._view_type
+
+        def abort_analysis(self):
+            self.aborted = True
+            self.release.set()
+
+        def update_analysis_and_wait(self):
+            self.release.wait(5)
+
+    class BN:
+        def __init__(self):
+            self.loaded = []
+
+        def load(self, *args, **kwargs):
+            view = TestLoadedViewOwnership.View()
+            self.loaded.append(view)
+            return view
+
+    def test_bn_load_requires_analysis_to_be_disabled(self, bv):
+        module = self.BN()
+        result = CodeExecutor().execute("bn.load('x')", target=bv, bn=module)
+        assert not result.success
+        assert "update_analysis=False" in (result.error or "")
+        assert module.loaded == []
+
+    def test_loaded_view_is_closed_at_call_end(self, bv):
+        module = self.BN()
+        result = CodeExecutor().execute(
+            "v = bn.load('x', update_analysis=False)\nprint(v.view_type)",
+            target=bv,
+            bn=module,
+        )
+        assert result.success
+        assert result.output.strip() == "Mapped"
+        assert len(module.loaded) == 1 and module.loaded[0].closed
+
+    def test_loaded_view_is_closed_after_an_exception(self, bv):
+        module = self.BN()
+        result = CodeExecutor().execute(
+            "bn.load('x', update_analysis=False)\nraise ValueError('boom')",
+            target=bv,
+            bn=module,
+        )
+        assert not result.success
+        assert len(module.loaded) == 1 and module.loaded[0].closed
+
+    def test_timeout_aborts_and_closes_loaded_view(self, bv):
+        module = self.BN()
+        executor = CodeExecutor(timeout=0.05)
+        result = executor.execute(
+            "v = bn.load('x', update_analysis=False)\n"
+            "wait = getattr(v, 'update_analysis_and_wait')\n"
+            "wait()\n"
+            "bv.rename('must_not_run')",
+            target=bv,
+            bn=module,
+        )
+        assert result.timed_out
+        assert executor.wait_for_idle(timeout=3)
+        assert len(module.loaded) == 1
+        assert module.loaded[0].aborted and module.loaded[0].closed
+        assert bv.renames == []
 
 
 class TestInterruption:
@@ -359,6 +472,13 @@ class TestCheckpointCompilation:
         scope = {TIMEOUT_CHECK_GLOBAL: lambda: None}
         exec(compiled, scope, scope)
         assert scope["documented"].__doc__ == "Kept."
+
+    def test_direct_blocking_analysis_wait_is_rejected(self):
+        with pytest.raises(ValueError, match="update_analysis"):
+            compile_script(
+                "other.update_analysis_and_wait()",
+                f"{SCRIPT_PREFIX}analysis-wait>",
+            )
 
     def test_direct_rebase_is_rejected(self):
         with pytest.raises(ValueError, match="rebase_view"):
