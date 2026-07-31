@@ -41,7 +41,9 @@ def _get_status_text(running: bool, script=None, *, shutting_down: bool = False)
     if shutting_down:
         return "🟡 MCP: Shutting down..."
     if script is not None:
-        _target, elapsed, timed_out = script
+        _target, elapsed, timed_out, stuck = script
+        if stuck:
+            return f"⚠️ MCP: call may be stuck {elapsed:.0f}s"
         if timed_out:
             return f"⚠️ MCP: timed out; native call active {elapsed:.0f}s"
         return f"⚠️ MCP: running script {elapsed:.0f}s. Do not edit"
@@ -55,8 +57,14 @@ def _get_status_tooltip(script=None, *, shutting_down: bool = False) -> str:
         return "Waiting for active MCP work to finish before stopping"
     if script is None:
         return "Click to start/stop MCP server"
-    target, _elapsed, timed_out = script
+    target, _elapsed, timed_out, stuck = script
     where = f" against {target}" if target else ""
+    if stuck:
+        return (
+            f"A call may be stuck inside native code{where}.\n"
+            "Analysis cancellation was requested; restarting Binary Ninja may "
+            "be required."
+        )
     if timed_out:
         return (
             f"A timed-out script is still inside native code{where}.\n"

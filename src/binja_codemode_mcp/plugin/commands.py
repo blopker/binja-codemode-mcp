@@ -46,7 +46,7 @@ class BinjaCodeModeMCP:
         return self._shutdown_thread is not None
 
     @property
-    def running_script(self) -> tuple[str | None, float, bool] | None:
+    def running_script(self) -> tuple[str | None, float, bool, bool] | None:
         if self._backend is None:
             return None
         try:

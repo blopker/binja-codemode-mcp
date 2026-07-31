@@ -682,6 +682,7 @@ class PluginBackend:
             code,
             target=tab.bv,
             target_name=tab.name,
+            description=description,
             bn=self._bn,
             helpers=self.helpers,
             on_call=on_call,
@@ -700,7 +701,7 @@ class PluginBackend:
         logger.info("%s in %.1fs", verdict, result.elapsed_s)
         return result
 
-    def running_script(self) -> tuple[str | None, float, bool] | None:
+    def running_script(self) -> tuple[str | None, float, bool, bool] | None:
         """A script in flight, for the status indicator to warn about."""
         return self.executor.running_script()
 

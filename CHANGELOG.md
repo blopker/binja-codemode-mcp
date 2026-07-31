@@ -31,6 +31,9 @@ A rewrite.
 - Views returned by the injected `bn.load` require `update_analysis=False`, are aborted
   after timeout, and close when the call actually finishes instead of leaking analysis
   threads and UI state.
+- Calls still active after 200 seconds are marked as possibly stuck in logs, tool errors,
+  and the status bar; the watchdog retries analysis cancellation before recommending a
+  Binary Ninja restart.
 - Read-only secondary views always roll back, including mutations Binary Ninja does not
   report through notifications.
 - Server shutdown drains accepted requests and lingering execution before allowing a

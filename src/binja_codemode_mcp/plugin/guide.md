@@ -7,10 +7,9 @@
 - Calls return after 30 seconds. Native code cannot be killed; while it unwinds the
   UI says timed out and other calls wait. Never use `update_analysis_and_wait()`;
   call `update_analysis()` and inspect results later.
-- `print()` returns 32 KB; errors keep their last 4 KB. Complete output needs an
-  absolute `output_directory` and alphanumeric `output_extension`; it streams at
-  most 100 MiB to a generated `.partial`, renamed `.failed` on error. Print
-  addresses as hex.
+- `print()` returns 32 KB; errors keep 4 KB. Complete output uses an absolute
+  `output_directory` and alphanumeric `output_extension`, streaming 100 MiB at most
+  through `.partial`, renamed `.failed` on error. Print addresses as hex.
 - Do not call Qt, `binaryninjaui`, or `PySide6`: scripts run off the GUI thread.
 - Do not use handed views as a context manager; exiting closes the user's view.
   `bn.load()` requires `update_analysis=False`; its view closes at call end.

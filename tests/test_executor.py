@@ -169,6 +169,42 @@ class TestTimeout:
         gate.set()
         assert executor.wait_for_idle(timeout=3)
 
+    def test_a_very_late_call_is_marked_stuck_and_analysis_is_aborted(self, bv, caplog):
+        import logging
+        import threading
+        import time
+
+        gate = threading.Event()
+        aborted = threading.Event()
+        bv.abort_analysis = aborted.set
+        executor = CodeExecutor(timeout=0.02, queue_wait=0.01, stuck_after=0.08)
+        result = executor.execute(
+            "gate.wait(5)",
+            target=bv,
+            target_name="firmware",
+            description="analyze vectors",
+            extra={"gate": gate},
+        )
+        assert result.timed_out
+        assert aborted.wait(1), "the second-stage watchdog did not request abort"
+
+        live = executor.running_script()
+        assert live is not None and live[2:] == (True, True)
+        refused = executor.execute("pass", target=bv)
+        assert "analyze vectors" in (refused.error or "")
+        assert "may be stuck" in (refused.error or "")
+        assert "Restarting Binary Ninja may be required" in (refused.error or "")
+        assert any(
+            "call — analyze vectors — ran for over" in record.getMessage()
+            for record in caplog.get_records("call")
+            if record.levelno >= logging.ERROR
+        )
+
+        gate.set()
+        assert executor.wait_for_idle(timeout=3)
+        time.sleep(0.01)
+        assert executor.running_script() is None
+
 
 class TestSettleContract:
     """The parts of settling that decide whether a call told the truth."""

@@ -186,6 +186,7 @@ class _Outcome:
     reverted: bool = False  # set by the worker, read by the caller
     abandoned: bool = False  # set by the caller, read by the worker
     settling: bool = False  # the script finished; transactions are closing
+    reverting: bool = False  # the settlement in progress is a rollback
     settled: bool = False  # the worker closed its transactions and is done
     finalize_lock: threading.Lock = field(default_factory=threading.Lock)
 
@@ -499,17 +500,21 @@ class CodeExecutor:
         max_output_bytes: int = 32_000,
         timeout: float = 30.0,
         queue_wait: float = 5.0,
+        stuck_after: float = 200.0,
     ) -> None:
         self.max_output_bytes = max_output_bytes
         self.timeout = timeout
         self.queue_wait = queue_wait
+        self.stuck_after = stuck_after
         # One script at a time. Two open undo states on one database interleave:
         # reverting the inner one rewinds whatever the outer one recorded after
         # it, so a failing script can silently roll back a successful one.
         self._busy = threading.Lock()
         self._started_at: float | None = None
         self._running_target: str | None = None
+        self._running_description: str | None = None
         self._timed_out = False
+        self._stuck = False
         self._idle = threading.Event()
         self._idle.set()
 
@@ -520,14 +525,18 @@ class CodeExecutor:
             raise ExecutorBusyError(self._busy_message())
         self._started_at = time.time()
         self._running_target = target_name
+        self._running_description = None
         self._timed_out = False
+        self._stuck = False
         self._idle.clear()
         try:
             yield
         finally:
             self._started_at = None
             self._running_target = None
+            self._running_description = None
             self._timed_out = False
+            self._stuck = False
             self._idle.set()
             self._busy.release()
 
@@ -536,6 +545,17 @@ class CodeExecutor:
         running_for = time.time() - started_at if started_at else 0.0
         on = self._running_target
         whose = f" on {on}" if on else ""
+        if self._stuck:
+            detail = (
+                f" — {self._running_description} —"
+                if self._running_description
+                else whose
+            )
+            return (
+                f"A previous call{detail} ran for over {self.stuck_after:.0f}s "
+                f"and may be stuck ({running_for:.0f}s so far). Restarting "
+                "Binary Ninja may be required."
+            )
         if self._timed_out:
             state = "timed out and is still inside a native call"
         else:
@@ -553,6 +573,7 @@ class CodeExecutor:
         *,
         target: Any,
         target_name: str = "the target",
+        description: str | None = None,
         bn: Any = None,
         helpers: Any = None,
         extra: dict[str, Any] | None = None,
@@ -609,7 +630,9 @@ class CodeExecutor:
             publish_source(script_name, code)
             self._started_at = started
             self._running_target = target_name
+            self._running_description = description
             self._timed_out = False
+            self._stuck = False
             self._idle.clear()
 
             def captured_print(*args: Any, **kwargs: Any) -> None:
@@ -651,7 +674,9 @@ class CodeExecutor:
                     output.discard()
             self._started_at = None
             self._running_target = None
+            self._running_description = None
             self._timed_out = False
+            self._stuck = False
             self._idle.set()
             self._busy.release()
             return ExecutionResult(
@@ -659,6 +684,29 @@ class CodeExecutor:
                 output="",
                 error=f"Failed to prepare the call: {type(e).__name__}: {e}",
             )
+
+        watchdog: threading.Timer | None = None
+
+        def mark_stuck() -> None:
+            """Escalate a call that is still trapped in native code."""
+            with outcome.finalize_lock:
+                if outcome.settled:
+                    return
+                self._stuck = True
+                label = description or f"on {target_name}"
+                logger.error(
+                    "call — %s — ran for over %.0fs and may be stuck. "
+                    "Restarting Binary Ninja may be required.",
+                    label,
+                    self.stuck_after,
+                )
+                if not outcome.settling:
+                    # Analysis waits are the common recoverable native stall.
+                    # This is best effort; arbitrary native calls still require
+                    # a Binary Ninja process restart.
+                    with contextlib.suppress(Exception):
+                        target.abort_analysis()
+                    loaded_views.abort_analysis()
 
         def run() -> None:
             executed = False
@@ -690,6 +738,7 @@ class CodeExecutor:
                 # Set before settling, not after: a commit that outruns the
                 # deadline cannot be called back, so the caller has to be able
                 # to tell "still running, will revert" from "already landing".
+                outcome.reverting = revert
                 outcome.settling = True
                 reverted, failure = batch.settle(revert=revert)
                 outcome.reverted = reverted
@@ -759,9 +808,13 @@ class CodeExecutor:
                         target_name,
                         time.time() - started,
                     )
+                if watchdog is not None:
+                    watchdog.cancel()
                 self._started_at = None
                 self._running_target = None
+                self._running_description = None
                 self._timed_out = False
+                self._stuck = False
                 self._idle.set()
                 self._busy.release()
 
@@ -773,7 +826,9 @@ class CodeExecutor:
                 output.discard()
             self._started_at = None
             self._running_target = None
+            self._running_description = None
             self._timed_out = False
+            self._stuck = False
             self._idle.set()
             self._busy.release()
             return ExecutionResult(
@@ -794,6 +849,15 @@ class CodeExecutor:
                 if not outcome.settled:
                     outcome.abandoned = True
                     self._timed_out = True
+                    delay = max(0.0, self.stuck_after - (time.time() - started))
+                    watchdog = threading.Timer(delay, mark_stuck)
+                    watchdog.daemon = True
+                    watchdog.name = "binja-mcp-stuck-watchdog"
+                    try:
+                        watchdog.start()
+                    except BaseException:
+                        logger.exception("failed to start stuck-call watchdog")
+                        watchdog = None
                     # Best effort for script-owned views blocked in native
                     # analysis. The next statement checkpoint prevents any
                     # later operation from running after the call returns.
@@ -816,14 +880,20 @@ class CodeExecutor:
                     "been rolled back."
                 )
             elif outcome.settling:
-                # The script itself finished; the database is mid-commit and
-                # cannot be called back. Claiming a rollback here would send the
-                # model to re-run work that in fact landed.
-                detail = (
-                    "the script finished but is still closing its transaction, so "
-                    "its changes are most likely being applied. Read the database "
-                    "back before re-running any of it."
-                )
+                if outcome.reverting:
+                    detail = (
+                        "the script was interrupted and its transaction is still "
+                        "being rolled back."
+                    )
+                else:
+                    # The script itself finished; the database is mid-commit and
+                    # cannot be called back. Claiming a rollback here would send
+                    # the model to re-run work that in fact landed.
+                    detail = (
+                        "the script finished but is still closing its transaction, "
+                        "so its changes are most likely being applied. Read the "
+                        "database back before re-running any of it."
+                    )
             else:
                 detail = (
                     "the script has not reached a cooperative timeout checkpoint, "
@@ -867,7 +937,7 @@ class CodeExecutor:
             **output.artifact_fields(),
         )
 
-    def running_script(self) -> tuple[str | None, float, bool] | None:
+    def running_script(self) -> tuple[str | None, float, bool, bool] | None:
         """The script in flight and how long it has run, or None when idle.
 
         Polled from the Qt main thread by the status indicator, so it must not
@@ -881,6 +951,7 @@ class CodeExecutor:
             self._running_target,
             max(0.0, time.time() - started),
             self._timed_out,
+            self._stuck,
         )
 
     def wait_for_idle(self, timeout: float | None = None) -> bool:

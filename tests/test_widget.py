@@ -143,8 +143,19 @@ def test_initialization_is_marshaled_to_the_main_thread(widget_module, monkeypat
 
 def test_timed_out_native_call_has_distinct_status(widget_module):
     module, _unregistered, _main_thread_calls = widget_module
-    script = ("firmware", 42.0, True)
+    script = ("firmware", 42.0, True, False)
     assert "timed out" in module._get_status_text(True, script)
     tooltip = module._get_status_tooltip(script)
     assert "native code" in tooltip
     assert "loaded views" in tooltip
+
+
+def test_stuck_native_call_requests_a_binary_ninja_restart(widget_module):
+    module, _unregistered, _main_thread_calls = widget_module
+    script = ("firmware", 204.0, True, True)
+    text = module._get_status_text(True, script)
+    assert "may be stuck" in text
+    assert "204s" in text
+    tooltip = module._get_status_tooltip(script)
+    assert "cancellation" in tooltip
+    assert "restarting Binary Ninja" in tooltip

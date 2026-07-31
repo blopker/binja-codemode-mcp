@@ -91,7 +91,8 @@ Images Binary Ninja marks non-relocatable require `allow_non_relocatable=true`.
 
 Builtins, imports, and filesystem access work. Return data with `print()`. Calls return
 after 30 seconds; native calls cannot be killed and may keep the server busy while they
-unwind. Results include a 32 KB preview and retain 4 KB of errors. Direct
+unwind. At 200 seconds the server requests analysis cancellation and warns that Binary
+Ninja may need restarting. Results include a 32 KB preview and retain 4 KB of errors. Direct
 `update_analysis_and_wait()` is refused; use `update_analysis()` and inspect later.
 `bn.load` requires `update_analysis=False`, and its view closes when the call finishes.
 
@@ -147,11 +148,12 @@ The server binds to `127.0.0.1`, checks `Origin`, and requires the bearer token.
 default token is intended to prevent accidental access, not secure the endpoint from
 other local software.
 
-Submitted code runs inside Binary Ninja with your user permissions. There is
-deliberately no sandbox: Python can read files, import modules, and start processes.
-Undo transactions protect managed BinaryViews, not files, subprocesses, imported
-modules, or views opened by bypassing the injected `bn.load`. Connect only trusted
-clients.
+## Security
+
+Submitted code runs inside Binary Ninja with your user permissions. **This does not
+inherit the agent harness sandbox.** The agent will have access to a full Python
+environment with your user permissions. For increased security, create an additional
+sandbox around Binary Ninja when running it.
 
 ## Development
 
