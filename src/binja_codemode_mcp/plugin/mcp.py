@@ -48,8 +48,10 @@ file. `bn.load` requires `update_analysis=False` and closes its view at call end
 Filter before decompiling and print addresses as hex. Calls are otherwise stateless.
 Read `binja_guide` before non-trivial work."""
 
-GUIDE_DESCRIPTION = """\
-Return live session details and concise guidance for safe queries and edits."""
+GUIDE_DESCRIPTION = (
+    "Return live session details and the full guide, one section, or its table of "
+    "contents."
+)
 
 DEFINE_LIB_DESCRIPTION = """\
 Define or replace one reusable function. `source` must contain one self-contained,
@@ -328,7 +330,10 @@ class MCPHandler:
                     "properties": {
                         "topic": {
                             "type": "string",
-                            "description": "Section name; omit for the full guide.",
+                            "description": (
+                                'Section name, or "toc" to list sections; omit for '
+                                "the full guide."
+                            ),
                         }
                     },
                 },

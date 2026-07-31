@@ -75,7 +75,7 @@ Then ask for work directly:
 - `rebase_view` backs up and relocates a clean saved database through Binary Ninja's
   UI.
 - `binja_guide` returns live session details and concise guidance for safe queries and
-  edits.
+  edits. Pass `topic="toc"` to list sections or a section name to read only that part.
 
 Rebase backups are siblings named
 `<database-stem>.pre-rebase-YYYYMMDDTHHMMSS±HHMM.bndb`; a collision is an error.

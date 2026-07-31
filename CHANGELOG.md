@@ -62,6 +62,7 @@ A rewrite.
   read on its own.
 - `binja_guide` generates a live header — loaded binary, architecture, analysis state,
   Binary Ninja version, open tabs — so the guidance describes the actual session.
+- `binja_guide(topic="toc")` lists its sections without returning the full guide.
 - The code sandbox is removed. It blocked legitimate stdlib use while providing no real
   containment: CPython injects the real builtins when `globals` has no `__builtins__`.
 - Config asks `binaryninja.user_directory()` instead of guessing paths per platform.

@@ -34,19 +34,25 @@ Filter `bv.functions` by name, address, or references before decompiling a few.
 ## Address layout
 
 `rebase_view` relocates an established database. Direct `bv.rebase()` is blocked
-because it replaces the transactional view. The tool requires a clean
-BNDB, writes a timestamped sibling backup, may reanalyze, and verifies the result.
+because it replaces the transactional view. The tool requires a clean BNDB, writes
+a timestamped sibling backup, may reanalyze, and verifies the result.
 
 Non-relocatable images need `allow_non_relocatable=true`; prefer `bv.memory_map`
 for raw firmware. A region maps data; a section only labels mapped addresses. For
 a header, read payload bytes from `bv.file.raw` at their file offset and add a
 region at the virtual base. Changes support undo and persist; legacy removal may not.
+Region flags default to `0`; mutable RAM/MMIO needs
+`bn.SegmentFlag.SegmentReadable | bn.SegmentFlag.SegmentWritable`, or zero-fill may
+become constants in IL. Add `SegmentExecutable` only for code.
 
 `bv.entry_point` is the loader entry; user entries are in `bv.entry_functions` and
 added with `bv.add_entry_point(addr)`. `bv.modified` reports unsaved changes,
 `bv.has_database` a BNDB, and `bv.save_auto_snapshot()` persists its current state.
 
 ## Querying
+
+Discover unfamiliar APIs with `dir(obj)`, `inspect.signature(callable)`, and
+`inspect.getdoc(callable)`.
 
 Use `bv.get_disassembly(addr)` for one instruction. Bound output:
 
@@ -195,11 +201,10 @@ Check `f.vars`; `f.parameter_vars` contains only arguments.
 
 Calls share no variables or imports. Pass one complete `def` to
 `define_lib_function`, then call it as `h.lib.name(bv)` from `execute`; the namespace
-is read-only. Definitions use
-that call's globals. Put imports and helpers inside, pass other values, and use
-immutable literal defaults. Annotations are not retained. Inspect with
-`list_lib_functions`, delete with `remove_lib_function`. Calls to `h.lib.other()`
-resolve dynamically; removing `other` makes its caller fail normally.
+is read-only. Definitions use that call's globals. Put imports and helpers inside,
+pass other values, and use immutable literal defaults. Annotations are not retained.
+Inspect with `list_lib_functions`; delete with `remove_lib_function`. Calls to
+`h.lib.other()` resolve dynamically; removing `other` makes its caller fail normally.
 
 ## Verification
 

@@ -82,6 +82,12 @@ def render(status: dict[str, Any], topic: str | None = None) -> str:
     header = render_header(status)
 
     if topic:
+        if topic.lower() == "toc":
+            entries = "\n".join(f"- {name}" for name in topics(markdown))
+            return (
+                f"{header}\n\n## Guide topics\n\n{entries}\n\n"
+                "Call `binja_guide` with a topic name to read that section."
+            )
         found = sections(markdown)
         for name, body in found.items():
             if name and name.lower() == topic.lower():

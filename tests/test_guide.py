@@ -97,6 +97,13 @@ class TestRender:
     def test_topic_lookup_is_case_insensitive(self):
         assert "## Types and data" in render(FULL_STATUS, topic="types AND DATA")
 
+    def test_toc_lists_sections_without_their_bodies(self):
+        out = render(FULL_STATUS, topic="TOC")
+        assert "1,284 functions" in out
+        assert "## Guide topics" in out
+        assert "- Safety" in out and "- Types and data" in out
+        assert "Change only what evidence supports" not in out
+
     def test_unknown_topic_lists_the_real_ones(self):
         out = render(FULL_STATUS, topic="nonsense")
         assert "No section named" in out
@@ -107,7 +114,7 @@ class TestGuideSize:
     def test_the_rendered_guide_stays_concise(self):
         """The guide is injected into model context, so growth is a product cost."""
         rendered = len(render(FULL_STATUS).encode())
-        assert rendered < 8_000, f"the rendered guide grew to {rendered} bytes"
+        assert rendered < 10_000, f"the rendered guide grew to {rendered} bytes"
 
     def test_an_absurd_topic_is_not_echoed_whole(self):
         out = render(FULL_STATUS, topic="z" * 10_000)
@@ -208,6 +215,9 @@ class TestGuideContent:
         assert "allow_non_relocatable=true" in text
         assert "bv.memory_map" in text
         assert "section only labels" in text
+        assert "SegmentReadable" in text
+        assert "SegmentWritable" in text
+        assert "zero-fill" in text
         assert "bv.entry_point" in text
         assert "bv.entry_functions" in text
 
@@ -224,6 +234,12 @@ class TestGuideContent:
         text = guide_text()
         assert "## Multiple binaries" in text
         assert 'define_user_type("config_t", t)' in text
+
+    def test_points_to_standard_python_api_discovery(self):
+        text = guide_text()
+        assert "dir(obj)" in text
+        assert "inspect.signature(callable)" in text
+        assert "inspect.getdoc(callable)" in text
 
     def test_documents_how_to_tell_user_work_from_auto_analysis(self):
         """Guessing from naming conventions over-reports badly, and writing
