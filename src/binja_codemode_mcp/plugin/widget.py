@@ -28,6 +28,7 @@ _status_container = None
 _indicator_timer = None
 _ui_notification = None
 _plugin_instance = None
+_tick_failure_logged = False
 
 
 def _get_status_text(running: bool, script=None, *, shutting_down: bool = False) -> str:
@@ -183,7 +184,7 @@ def _timer_tick():
     second forever: Qt can destroy the underlying C++ widget (closing a window)
     while the Python wrapper survives, and touching it then raises.
     """
-    global _status_button, _status_container
+    global _status_button, _status_container, _tick_failure_logged
     try:
         _ensure_indicator_in_status_bar()
         _update_status_indicator()
@@ -191,6 +192,12 @@ def _timer_tick():
         # Wrapped C++ object went away; rebuild on the next tick.
         _status_button = None
         _status_container = None
+    except Exception:
+        # Anything else keeps recurring at every tick, so report it once
+        # rather than letting the timer flood the log with tracebacks.
+        if not _tick_failure_logged:
+            _tick_failure_logged = True
+            logger.exception("status indicator update failed; suppressing repeats")
 
 
 class MCPUINotification(UIContextNotification):
@@ -277,7 +284,8 @@ def cleanup_status_indicator():
 def _cleanup_status_indicator():
     """Clean up the status indicator resources."""
     global _indicator_timer, _ui_notification, _status_button, _status_container
-    global _plugin_instance
+    global _plugin_instance, _tick_failure_logged
+    _tick_failure_logged = False
 
     if _indicator_timer is not None:
         _indicator_timer.stop()

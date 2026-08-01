@@ -132,11 +132,24 @@ def _definition(source: str) -> ast.FunctionDef:
 
 
 def _global_reads(code: types.CodeType) -> set[str]:
-    """Names loaded from function globals, including nested function bodies."""
+    """Names loaded from function globals, including nested bodies.
+
+    LOAD_NAME alongside LOAD_GLOBAL because nested class bodies read
+    unqualified names with it; missing those passes a definition that
+    NameErrors at call time. A name the same code object also stores is a
+    class-body local, not a global read.
+    """
+    instructions = list(dis.get_instructions(code))
+    stored = {
+        str(instruction.argval)
+        for instruction in instructions
+        if instruction.opname == "STORE_NAME"
+    }
     names = {
         str(instruction.argval)
-        for instruction in dis.get_instructions(code)
+        for instruction in instructions
         if instruction.opname == "LOAD_GLOBAL"
+        or (instruction.opname == "LOAD_NAME" and str(instruction.argval) not in stored)
     }
     for const in code.co_consts:
         if isinstance(const, types.CodeType):

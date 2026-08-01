@@ -141,6 +141,36 @@ def test_initialization_is_marshaled_to_the_main_thread(widget_module, monkeypat
     assert len(main_thread_calls) == 1
 
 
+def test_tick_contains_unexpected_failures_and_logs_once(widget_module, monkeypatch):
+    module, _unregistered, _main_thread_calls = widget_module
+
+    def boom():
+        raise ValueError("ui misbehaved")
+
+    monkeypatch.setattr(module, "_ensure_indicator_in_status_bar", boom)
+    logged: list[object] = []
+    monkeypatch.setattr(module.logger, "exception", lambda *a, **k: logged.append(a))
+
+    module._timer_tick()  # must not propagate into Qt's timer dispatch
+    module._timer_tick()
+    assert len(logged) == 1  # the timer fires twice a second, forever
+
+
+def test_tick_rebuilds_widgets_after_qt_deletes_them(widget_module, monkeypatch):
+    module, _unregistered, _main_thread_calls = widget_module
+
+    def gone():
+        raise RuntimeError("wrapped C++ object has been deleted")
+
+    monkeypatch.setattr(module, "_ensure_indicator_in_status_bar", gone)
+    module._status_button = object()
+    module._status_container = object()
+
+    module._timer_tick()
+    assert module._status_button is None
+    assert module._status_container is None
+
+
 def test_timed_out_native_call_has_distinct_status(widget_module):
     module, _unregistered, _main_thread_calls = widget_module
     script = ("firmware", 42.0, True, False)

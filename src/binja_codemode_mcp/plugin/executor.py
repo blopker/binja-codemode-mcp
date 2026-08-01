@@ -268,11 +268,10 @@ class _Budget:
         self._truncated = False
 
     def write(self, text: str) -> None:
-        """Deliberately lock-free.
+        """Not safe to call concurrently on its own.
 
-        Exactly one script runs at a time, so there is one writer and one
-        reader. The reader may see a slightly shorter prefix while the writer
-        finishes, which is harmless, and a lock here would tax every print.
+        Every caller goes through _CapturedOutput, whose lock serializes
+        writes against reads and the timeout path's finalization.
         """
         if self._truncated:
             return
@@ -295,7 +294,7 @@ class _Budget:
         self._truncated = True
 
     def value(self, full_output: bool = False) -> str:
-        out = "".join(self._chunks[:])  # snapshot first; the writer may still run
+        out = "".join(self._chunks)
         truncated = self._truncated
         if not truncated:
             return out
@@ -518,27 +517,45 @@ class CodeExecutor:
         self._idle = threading.Event()
         self._idle.set()
 
+    def _mark_running(
+        self,
+        target_name: str,
+        description: str | None,
+        started_at: float | None = None,
+    ) -> None:
+        """Publish the call the acquired lock now covers. Caller holds _busy."""
+        self._started_at = started_at if started_at is not None else time.time()
+        self._running_target = target_name
+        self._running_description = description
+        self._timed_out = False
+        self._stuck = False
+        self._idle.clear()
+
+    def _release(self) -> None:
+        """Clear the running-call state and hand the serialization lock back.
+
+        Every path out of an acquired call funnels through here; a path that
+        skipped it would leave the executor refusing calls for the life of
+        the process.
+        """
+        self._started_at = None
+        self._running_target = None
+        self._running_description = None
+        self._timed_out = False
+        self._stuck = False
+        self._idle.set()
+        self._busy.release()
+
     @contextlib.contextmanager
     def exclusive_operation(self, target_name: str) -> Any:
         """Serialize a non-script operation against scripts and settlement."""
         if not self._busy.acquire(timeout=self.queue_wait):
             raise ExecutorBusyError(self._busy_message())
-        self._started_at = time.time()
-        self._running_target = target_name
-        self._running_description = None
-        self._timed_out = False
-        self._stuck = False
-        self._idle.clear()
+        self._mark_running(target_name, None)
         try:
             yield
         finally:
-            self._started_at = None
-            self._running_target = None
-            self._running_description = None
-            self._timed_out = False
-            self._stuck = False
-            self._idle.set()
-            self._busy.release()
+            self._release()
 
     def _busy_message(self) -> str:
         started_at = self._started_at
@@ -628,12 +645,7 @@ class CodeExecutor:
                 artifact = ArtifactSink(artifact_spec)
             output = _CapturedOutput(self.max_output_bytes, artifact)
             publish_source(script_name, code)
-            self._started_at = started
-            self._running_target = target_name
-            self._running_description = description
-            self._timed_out = False
-            self._stuck = False
-            self._idle.clear()
+            self._mark_running(target_name, description, started_at=started)
 
             def captured_print(*args: Any, **kwargs: Any) -> None:
                 """print() is the result channel; output must be verbatim so the
@@ -672,13 +684,7 @@ class CodeExecutor:
             if output is not None:
                 with contextlib.suppress(Exception):
                     output.discard()
-            self._started_at = None
-            self._running_target = None
-            self._running_description = None
-            self._timed_out = False
-            self._stuck = False
-            self._idle.set()
-            self._busy.release()
+            self._release()
             return ExecutionResult(
                 success=False,
                 output="",
@@ -810,13 +816,7 @@ class CodeExecutor:
                     )
                 if watchdog is not None:
                     watchdog.cancel()
-                self._started_at = None
-                self._running_target = None
-                self._running_description = None
-                self._timed_out = False
-                self._stuck = False
-                self._idle.set()
-                self._busy.release()
+                self._release()
 
         thread = threading.Thread(target=run, daemon=True, name="binja-mcp-exec")
         try:
@@ -824,13 +824,7 @@ class CodeExecutor:
         except BaseException as e:
             with contextlib.suppress(Exception):
                 output.discard()
-            self._started_at = None
-            self._running_target = None
-            self._running_description = None
-            self._timed_out = False
-            self._stuck = False
-            self._idle.set()
-            self._busy.release()
+            self._release()
             return ExecutionResult(
                 success=False,
                 output="",

@@ -186,6 +186,9 @@ tabs, and the guide against a live Binary Ninja session using `tests/driver_plan
 
 - Some MCP calls may make the Binary Ninja window pop to the foreground. This is an API
   limitation. To avoid interruptions while working, minimize Binary Ninja.
+- One Binary Ninja instance per machine: the server binds a fixed port, so a second
+  instance cannot start its own. Multiple windows and tabs within one instance work;
+  running several instances is untested and unsupported.
 
 ## License
 

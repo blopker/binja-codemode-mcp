@@ -545,6 +545,25 @@ class TestLibrary:
                 "    return helper()"
             )
 
+    def test_nested_class_body_global_reads_are_checked(self, backend):
+        # Class bodies read names with LOAD_NAME, not LOAD_GLOBAL.
+        with pytest.raises(ValueError, match="LIMIT"):
+            backend.define_lib_function(
+                "def top():\n"
+                "    class Row:\n"
+                "        limit = LIMIT\n"
+                "    return Row.limit"
+            )
+        # Builtins and the class body's own earlier names are still fine.
+        backend.define_lib_function(
+            "def rows():\n"
+            "    class Row:\n"
+            "        width = len('ab')\n"
+            "        height = width * 2\n"
+            "    return Row.height"
+        )
+        assert backend.execute("print(h.lib.rows())").output.strip() == "4"
+
     def test_library_functions_call_each_other_dynamically(self, backend):
         backend.define_lib_function("def base():\n    return 6")
         backend.define_lib_function("def doubled():\n    return h.lib.base() * 2")

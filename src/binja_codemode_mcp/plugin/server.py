@@ -187,15 +187,12 @@ class _Handler(BaseHTTPRequestHandler):
             # either, so the connection cannot continue.
             self.close_connection = True
             return
-        remaining = min(max(length, 0), MAX_BODY_BYTES)
+        remaining = max(length, 0)
         while remaining:
             chunk = self.rfile.read(min(remaining, 65536))
             if not chunk:
                 break
             remaining -= len(chunk)
-        if length > MAX_BODY_BYTES:
-            # Too big to drain safely; the connection cannot be reused.
-            self.close_connection = True
 
     def _authorized(self) -> bool:
         # Compared as bytes: http.server decodes headers as latin-1, and

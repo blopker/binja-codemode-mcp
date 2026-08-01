@@ -393,9 +393,9 @@ class MCPHandler:
             artifact = _artifact_note(result)
             tail = ""
             if result.error:
-                note = _ROLLBACK_NOTE if getattr(result, "reverted", False) else ""
-                room = MAX_ERROR_BYTES - _size(_ERROR_PREFIX) - _size(note)
-                tail = _ERROR_PREFIX + _clip_error(result.error, room) + note
+                rollback = _ROLLBACK_NOTE if getattr(result, "reverted", False) else ""
+                room = MAX_ERROR_BYTES - _size(_ERROR_PREFIX) - _size(rollback)
+                tail = _ERROR_PREFIX + _clip_error(result.error, room) + rollback
 
             allowance = MAX_RESULT_BYTES - _size(footer) - _size(artifact)
             if tail:
