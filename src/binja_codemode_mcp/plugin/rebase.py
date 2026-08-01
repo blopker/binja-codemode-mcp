@@ -182,9 +182,14 @@ def verify_rebase(
     new_base: int,
     *,
     requested_entry_point: int | None = None,
-) -> list[str]:
-    """Return failed postconditions; an empty list means verification passed."""
+) -> tuple[list[str], list[str]]:
+    """Return (failed postconditions, informational notes).
+
+    Empty problems means verification passed; notes are observations the
+    result should carry without failing the rebase.
+    """
     problems: list[str] = []
+    notes: list[str] = []
     delta = new_base - before.start
     if after.start != new_base:
         problems.append(f"view starts at {after.start:#x}, expected {new_base:#x}")
@@ -215,6 +220,11 @@ def verify_rebase(
         ):
             problems.append(f"region {old.name!r} changed shape, flags, or state")
 
+    # Rebasing a relocatable image legitimately rewrites relocated pointers
+    # (including chained fixups that relocation_ranges does not list), so a
+    # changed sample only condemns a non-relocatable rebase, where mapped
+    # bytes are supposed to move untouched.
+    changed_samples = problems if not before.relocatable else notes
     for sample in before.samples:
         if sample.region >= len(after.regions):
             continue
@@ -228,7 +238,7 @@ def verify_rebase(
             None,
         )
         if actual != sample.data:
-            problems.append(
+            changed_samples.append(
                 f"mapped bytes changed in region {old_region.name!r} "
                 f"at offset {sample.offset:#x}"
             )
@@ -260,7 +270,7 @@ def verify_rebase(
             f"requested analysis entry point {requested_entry_point:#x} "
             "is not present in entry_functions"
         )
-    return problems
+    return problems, notes
 
 
 def format_rebase_result(
@@ -270,6 +280,7 @@ def format_rebase_result(
     *,
     requested_entry_point: int | None,
     backup_path: Path,
+    notes: list[str] | None = None,
 ) -> str:
     delta = after.start - before.start
     lines = [
@@ -278,6 +289,11 @@ def format_rebase_result(
         f"{len(after.samples)} byte samples, and user annotation counts.",
         f"Loader entry point: {before.entry_point:#x} -> {after.entry_point:#x}.",
     ]
+    for note in notes or []:
+        lines.append(
+            f"Note: {note} — expected on a relocatable image, where the rebase "
+            "rewrites relocated pointers."
+        )
     if requested_entry_point is not None:
         lines.append(f"Analysis entry point added at {requested_entry_point:#x}.")
     if not before.relocatable:

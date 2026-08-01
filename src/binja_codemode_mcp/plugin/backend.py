@@ -364,6 +364,16 @@ class Helpers:
             )
         object.__setattr__(self, name, value)
 
+    def __delattr__(self, name: str) -> None:
+        # Helpers outlives the call: an unguarded `del h.lib` would break every
+        # later call until the server restarts, and make `lib` assignable again.
+        if name == "lib":
+            raise AttributeError(
+                "h.lib cannot be deleted. Use remove_lib_function to remove "
+                "one function."
+            )
+        object.__delattr__(self, name)
+
     def bind_call(self, scope: dict[str, Any], batch: Batch, target: BinaryTab) -> None:
         """Called by the executor before a script runs."""
         self._scope = scope
@@ -575,7 +585,7 @@ class PluginBackend:
                 replacement.update_analysis()
 
             after = capture_rebase_state(replacement)
-            problems = verify_rebase(
+            problems, notes = verify_rebase(
                 before,
                 after,
                 new_base,
@@ -597,6 +607,7 @@ class PluginBackend:
                 after,
                 requested_entry_point=entry_point,
                 backup_path=backup_path,
+                notes=notes,
             )
             logger.info("rebase verified: %#x -> %#x", before.start, after.start)
             return result

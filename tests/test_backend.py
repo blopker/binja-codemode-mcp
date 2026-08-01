@@ -577,6 +577,14 @@ class TestLibrary:
         assert not replacement.success
         assert "define_lib_function" in (replacement.error or "")
 
+        # Helpers outlives the call, so `del h.lib` would break every later
+        # call until the server restarts — and reopen the door to `h.lib = {}`.
+        removal = backend.execute("del h.lib")
+        assert not removal.success
+        assert "remove_lib_function" in (removal.error or "")
+        backend.define_lib_function("def still_here():\n    return 1")
+        assert backend.execute("print(h.lib.still_here())").output.strip() == "1"
+
     def test_immutable_literal_defaults_are_accepted(self, backend):
         backend.define_lib_function(
             "def options(config=(-1, (2, None), b'x')):\n    return config"

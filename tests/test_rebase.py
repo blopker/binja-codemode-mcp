@@ -138,7 +138,7 @@ def test_backup_path_is_timestamped_non_overwriting_sibling(tmp_path):
 def test_verification_accepts_a_uniform_rebase():
     before = state()
     after = state(0x08004000, modified=True)
-    assert verify_rebase(before, after, 0x08004000) == []
+    assert verify_rebase(before, after, 0x08004000) == ([], [])
 
 
 def test_verification_preserves_a_zero_loader_entry_sentinel():
@@ -146,21 +146,37 @@ def test_verification_preserves_a_zero_loader_entry_sentinel():
     original.entry_point = 0
     replacement = RebaseView(0x08004000, modified=True)
     replacement.entry_point = 0
-    assert (
-        verify_rebase(
-            capture_rebase_state(original),
-            capture_rebase_state(replacement),
-            0x08004000,
-        )
-        == []
-    )
+    assert verify_rebase(
+        capture_rebase_state(original),
+        capture_rebase_state(replacement),
+        0x08004000,
+    ) == ([], [])
 
 
-def test_verification_detects_changed_mapped_bytes():
+def test_changed_bytes_are_a_note_on_a_relocatable_image():
+    # Rebasing a relocatable image legitimately rewrites relocated pointers in
+    # mapped data, so changed samples must not fail the rebase.
     before = state()
     replacement = CorruptRebaseView(0x08004000, modified=True)
-    problems = verify_rebase(before, capture_rebase_state(replacement), 0x08004000)
+    problems, notes = verify_rebase(
+        before, capture_rebase_state(replacement), 0x08004000
+    )
+    assert problems == []
+    assert any("mapped bytes changed" in note for note in notes)
+
+
+def test_changed_bytes_fail_a_non_relocatable_image():
+    original = RebaseView()
+    original.relocatable = False
+    replacement = CorruptRebaseView(0x08004000, modified=True)
+    replacement.relocatable = False
+    problems, notes = verify_rebase(
+        capture_rebase_state(original),
+        capture_rebase_state(replacement),
+        0x08004000,
+    )
     assert any("mapped bytes changed" in problem for problem in problems)
+    assert notes == []
 
 
 def test_backend_rebases_replacement_and_adds_entry(tmp_path):
@@ -184,3 +200,17 @@ def test_backend_rebases_replacement_and_adds_entry(tmp_path):
     assert "0x8004000" in result
     assert "0x80040d0" in result
     assert original.created_databases[0] in result
+
+
+def test_backend_reports_relocated_byte_changes_as_a_note(tmp_path):
+    original = RebaseView(filename=str(tmp_path / "firmware.bndb"))
+    tabs = [BinaryTab(0, "firmware", original.file.filename, original)]
+
+    backend = PluginBackend(
+        Config(api_key="k", data_dir=tmp_path),
+        tabs_provider=lambda: tabs,
+        rebase_provider=lambda view, address: CorruptRebaseView(address, modified=True),
+    )
+    result = backend.rebase_view(None, 0x08004000)
+    assert "mapped bytes changed" in result
+    assert "relocat" in result  # the note says why changed bytes are expected
